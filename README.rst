@@ -276,18 +276,8 @@ tag, builds a wheel and source distribution, validates their metadata, and
 publishes through PyPI Trusted Publishing. It runs when a GitHub release is
 published. Routine pushes only run tests.
 
-Before the first release, configure a pending publisher at
-https://pypi.org/manage/account/publishing/ with these exact values:
-
-* PyPI project: ``django-derived-relation``
-* GitHub owner: ``schinckel``
-* Repository: ``django-derived-relation``
-* Workflow filename: ``release.yml``
-* Environment: ``pypi``
-
-No PyPI API token is needed. See
-https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/.
-The GitHub ``pypi`` environment can be configured with release reviewers.
+PyPI Trusted Publishing is configured for this repository’s ``release.yml``
+workflow and the GitHub ``pypi`` environment. No PyPI API token is needed.
 
 For each release, update ``project.version`` in ``pyproject.toml``, commit and
 push the change, then publish a GitHub release with the corresponding
