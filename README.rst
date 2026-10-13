@@ -8,6 +8,24 @@ calculate columns, or select an ordered subset before joining them to an outer
 query. With ``lateral=True``, the source can use ``OuterRef`` to refer to the
 outer row.
 
+Why this is needed
+==================
+
+Sometimes the thing you need to join is a query result: the latest exchange
+rate for each invoice, or sales totals grouped by product and warehouse.
+Django's relationship joins start from model tables. ``FilteredRelation`` can
+add an ON condition, but cannot replace the joined table with an ordered,
+limited, or grouped queryset.
+
+A scalar ``Subquery`` works when you need one column. If you need several
+columns from the same selected row, you often end up repeating that subquery.
+``DerivedRelation`` lets you define the source once, join its result, and use
+its columns in the outer query. LATERAL joins allow that source to depend on
+each outer row; ordinary derived joins handle independent results.
+
+This gives the ORM another way to express the query. Whether it is faster
+depends on the data and execution plan.
+
 This backport targets Django 5.2 and later releases before the core feature is
 available. PostgreSQL is required. Future Django releases require regression
 verification; the target range does not mean unreleased versions have been
