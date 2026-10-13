@@ -227,6 +227,104 @@ Snapshots without sales remain present with ``None`` for the totals; use
 rows, so aggregating their values over an expanded result can count a summary
 more than once.
 
+Geographic matches without a foreign key
+========================================
+
+An address might need its nearest service centre and the regions that cover
+it. Neither match needs a stored foreign key. These examples require GeoDjango,
+PostGIS, and ``django.contrib.gis.db.backends.postgis``.
+
+.. code-block:: python
+
+    from django.contrib.gis.db import models
+    from django.contrib.gis.db.models.functions import Distance
+    from django.db.models import ExpressionWrapper, F, OuterRef, Q
+
+    from django_derived_relation import DerivedQuerySet, DerivedRelation
+
+
+    class Address(models.Model):
+        objects = DerivedQuerySet.as_manager()
+
+        location = models.PointField(srid=28354)
+
+
+    class ServiceCentre(models.Model):
+        name = models.CharField(max_length=100)
+        active = models.BooleanField(default=True)
+        location = models.PointField(srid=28354)
+
+
+    class Region(models.Model):
+        name = models.CharField(max_length=100)
+        active = models.BooleanField(default=True)
+        boundary = models.MultiPolygonField(srid=28354)
+
+These models use a projected coordinate system suitable for the Adelaide
+area, with distances in metres. Choose a coordinate system appropriate for
+your data; longitude/latitude geometry coordinates are not metres.
+
+Nearest active service centre
+-----------------------------
+
+.. code-block:: python
+
+    address_location = ExpressionWrapper(
+        OuterRef("location"),
+        output_field=models.PointField(srid=28354),
+    )
+    nearest = (
+        ServiceCentre.objects.filter(
+            active=True,
+            location__dwithin=(OuterRef("location"), 5000),
+        )
+        .annotate(distance=Distance("location", address_location))
+        .order_by("distance", "pk")
+        .values("id", "name", "distance")[:1]
+    )
+    addresses = Address.objects.alias(
+        nearest=DerivedRelation(nearest, lateral=True),
+    ).annotate(
+        service_centre_id=F("nearest__id"),
+        service_centre_name=F("nearest__name"),
+        service_centre_distance=F("nearest__distance"),
+    )
+
+The source finds active centres within five kilometres, then chooses the
+nearest for each address. The primary key breaks distance ties. All three
+columns come from that selected centre. The wrapper supplies the geometry
+type needed by ``Distance`` while the outer reference is unresolved.
+
+The left join retains addresses without a nearby centre, with ``None`` for
+the three annotations. ``Distance`` returns GeoDjango distance objects; use
+``address.service_centre_distance.m`` to read metres when it is present.
+This measures straight-line distance, not travel time.
+
+Regions covering each address
+----------------------------
+
+.. code-block:: python
+
+    regions = Region.objects.filter(active=True).values("id", "name", "boundary")
+    matches = Address.objects.alias(
+        region=DerivedRelation(
+            regions,
+            condition=Q(region__boundary__covers=F("location")),
+        ),
+    ).values("id", "region__id", "region__name")
+
+This source is independent of the address, so it uses an ordinary derived
+join. The ON condition performs the spatial match using its projected
+boundary. ``covers`` includes points on the polygon boundary. An address
+covered by overlapping regions appears once per matching region; an address
+without a match still appears with ``None`` for the region columns.
+
+For a simple model-table spatial join, a derived source may not be necessary.
+It becomes useful when the region queryset also needs calculated columns or
+other source operations. See GeoDjango's
+`spatial lookups <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/geoquerysets/>`_
+and `distance functions <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/functions/>`_.
+
 ON conditions and result rows
 =============================
 
