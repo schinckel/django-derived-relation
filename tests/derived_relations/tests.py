@@ -825,12 +825,6 @@ class DerivedRelationTests(TestCase):
                 rows=DerivedRelation(Child.objects.select_related("parent"))
             )
 
-    def test_unsupported_source_shapes(self) -> None:
-        with self.assertRaises(NotSupportedError):
-            Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.all().union(Child.objects.all()))
-            )
-
     def test_reject_correlated_nonlateral_source(self) -> None:
         with self.assertRaisesMessage(ValueError, "require lateral=True"):
             Parent.objects.alias(rows=DerivedRelation(self.source()))
@@ -851,6 +845,13 @@ class DerivedRelationTests(TestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_deferred_combined_projection_keeps_implicit_primary_keys(self) -> None:
+        source = Child.objects.only("amount").union(
+            Child.objects.defer("parent", "sequence")
+        )
+        joined = Parent.objects.alias(rows=DerivedRelation(source))
+        self.assertEqual(tuple(joined.query.annotations), ("rows__id", "rows__amount"))
+
     def test_registration_rejects_model_field_collisions(self) -> None:
         relation = DerivedRelation(Child.objects.values("amount"))
         for queryset, names in (

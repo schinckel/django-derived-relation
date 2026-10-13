@@ -346,6 +346,43 @@ other source operations. See GeoDjango's
 `spatial lookups <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/geoquerysets/>`_
 and `distance functions <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/functions/>`_.
 
+Combined querysets as sources
+=============================
+
+Sources can use Django's ``union()``, ``intersection()``, and ``difference()``
+operations, including ``union(..., all=True)``. For existing models ``Foo`` and
+``Bar`` with compatible ``x`` fields:
+
+.. code-block:: python
+
+    source = Foo.objects.values("x").union(Bar.objects.values(other=F("x")))
+    matches = Foo.objects.alias(
+        combined=DerivedRelation(source, condition=Q(combined__x=F("x"))),
+    ).values("x", "combined__x")
+
+Only the outer model needs the adapter manager. As with Django's combined
+querysets, output names and ORM field types come from the first queryset.
+Later operands match columns by position; their names can differ. Operands
+must project the same number of columns with database-compatible types. Use
+``Cast`` in the operands when you need an explicit common type.
+
+Without an explicit ``values()`` projection, each operand retains its native
+``only()`` or ``defer()`` selection, including implicit primary-key columns.
+Mismatched projection widths fail as they do for an ordinary combined queryset.
+An explicit combined ``values()`` projection applies to unprojected operands
+using Django's usual rules.
+
+Ordering and slicing on the combined source apply before the join. Correlation
+in any operand, including a nested combination, requires ``lateral=True``.
+``union()`` removes duplicate result rows; ``union(..., all=True)`` retains
+them, so it can multiply outer rows. An empty source retains unmatched outer
+rows with a left join and removes them with an inner join.
+
+These are set-operation sources, not boolean combinations of outer querysets
+using ``&``, ``|``, or ``^``. Those remain unsupported. Django's restrictions on
+operations after a combined queryset and PostgreSQL's locking restrictions
+still apply.
+
 ON conditions and result rows
 =============================
 
@@ -443,7 +480,7 @@ LEFT join rows through an empty SQL source and still require a transaction.
 Transaction checks, unsupported-option errors, and PostgreSQL errors propagate
 normally. PostgreSQL rejects locking grouped, aggregate, distinct, and
 set-operation results; adding a locking clause does not make those shapes
-lockable. Combined sources remain unsupported by this adapter.
+lockable.
 
 Restrictions
 ============
@@ -455,9 +492,6 @@ These are implementation limits, not claims that the SQL is impossible.
 Listing them here does not promise future support.
 
 * Backends other than PostgreSQL.
-* Combined sources using ``union()``, ``intersection()``, or ``difference()``.
-  A union of compatible ``values()`` projections is a valid derived-table
-  shape, but the adapter does not yet support it.
 * Updating or deleting an outer queryset containing a derived relation, or
   combining outer querysets with ``&``, ``|``, or ``^``. Use ``Q`` trees for
   combined filter conditions.

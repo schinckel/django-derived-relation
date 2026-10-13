@@ -8,6 +8,9 @@ Unreleased
   Django's transaction checks and lock options and PostgreSQL's source-row
   locking restrictions.
 
+* Support ``union()``, ``intersection()``, and ``difference()`` querysets as
+  derived sources, including correlated operands with ``lateral=True``.
+
 * Allow registering ``DerivedRelation`` with ``annotate()`` as well as
   ``alias()``, without selecting the descriptor itself.
 * Preserve native ``only()`` and ``defer()`` root-model column selection in
