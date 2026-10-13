@@ -5,7 +5,7 @@ from decimal import Decimal
 from unittest import skipUnless
 from unittest.mock import patch
 
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import NotSupportedError, connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import (
@@ -27,7 +27,7 @@ from django.test import SimpleTestCase, TestCase
 import django_derived_relation
 from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
 
-from .models import Child, Parent
+from .models import Child, CompositeChild, InheritedChild, Parent
 
 
 class PostgreSQLSourceQuery(Query):
@@ -243,6 +243,167 @@ class DerivedRelationTests(TestCase):
             list(joined.order_by("name").values_list("rows__amount", flat=True)),
             [None, 30, 10],
         )
+
+    def test_deferred_sources_match_native_root_columns(self) -> None:
+        cases: tuple[tuple[QuerySet, tuple[str, ...]], ...] = (
+            (Child.objects.only("amount"), ("id", "amount")),
+            (Child.objects.defer("sequence"), ("id", "parent_id", "amount")),
+            (Child.objects.only("parent"), ("id", "parent_id")),
+            (Child.objects.only("parent_id"), ("id", "parent_id")),
+            (Child.objects.defer("parent"), ("id", "amount", "sequence")),
+            (Child.objects.defer("parent_id"), ("id", "amount", "sequence")),
+            (Child.objects.only("parent__name"), ("id", "parent_id")),
+            (
+                Child.objects.defer("parent__name"),
+                ("id", "parent_id", "amount", "sequence"),
+            ),
+            (Child.objects.defer("id"), ("id", "parent_id", "amount", "sequence")),
+            (Child.objects.only("amount").only("sequence"), ("id", "sequence")),
+            (
+                Child.objects.only("amount", "sequence").defer("sequence"),
+                ("id", "amount"),
+            ),
+            (
+                Child.objects.defer("sequence").only("amount", "sequence"),
+                ("id", "amount"),
+            ),
+            (
+                Child.objects.defer("sequence").defer("amount"),
+                ("id", "parent_id"),
+            ),
+            (
+                Child.objects.only("amount").defer(None),
+                ("id", "parent_id", "amount", "sequence"),
+            ),
+        )
+        for source, names in cases:
+            with self.subTest(deferred_loading=source.query.deferred_loading):
+                source = source.filter(parent=self.one)
+                native_select = source.query.get_compiler(
+                    connection=connection
+                ).get_select()[0]
+                self.assertEqual(
+                    tuple(
+                        expression.target.attname for expression, _, _ in native_select
+                    ),
+                    names,
+                )
+                joined = Parent.objects.filter(pk=self.one.pk).alias(
+                    rows=DerivedRelation(source, join_type="inner")
+                )
+                self.assertEqual(
+                    tuple(joined.query.annotations),
+                    tuple(f"rows__{name}" for name in names),
+                )
+                self.assertEqual(
+                    list(joined.values_list(*(f"rows__{name}" for name in names))),
+                    list(source.values_list(*names)),
+                )
+                for omitted in {"id", "parent_id", "amount", "sequence"} - set(names):
+                    with self.assertRaises(FieldError):
+                        joined.values(f"rows__{omitted}")
+                    with self.assertRaises(FieldError):
+                        joined.filter(**{f"rows__{omitted}": 1})
+
+    def test_deferred_source_retains_filters_ordering_and_annotations(self) -> None:
+        source = (
+            Child.objects.filter(parent_id=OuterRef("pk"), sequence__gte=1)
+            .only("amount")
+            .annotate(doubled=F("amount") * 2)
+            .alias(hidden=F("sequence"))
+            .order_by("-sequence")[:1]
+        )
+        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        self.assertEqual(
+            tuple(joined.query.annotations),
+            ("rows__id", "rows__amount", "rows__doubled"),
+        )
+        self.assertIsInstance(
+            joined.query.resolve_ref("rows__amount").output_field, models.IntegerField
+        )
+        self.assertEqual(
+            list(joined.order_by("name").values_list("rows__amount", "rows__doubled")),
+            [(None, None), (30, 60), (10, 20)],
+        )
+        restored = joined.all()
+        restored.query = pickle.loads(pickle.dumps(joined.query))
+        self.assertEqual(
+            list(restored.filter(name="many").values_list("rows__doubled", flat=True)),
+            [60],
+        )
+        self.assertEqual(source.query.deferred_loading, (frozenset({"amount"}), False))
+        self.assertIsNone(source.query.selected)
+        self.assertIsNone(source._result_cache)
+        with self.assertRaises(FieldError):
+            restored.values("rows__sequence")
+
+    def test_explicit_values_replace_deferred_source_selection(self) -> None:
+        for source in (
+            Child.objects.only("amount").values("sequence"),
+            Child.objects.defer("sequence").values("sequence"),
+        ):
+            with self.subTest(source=source):
+                joined = Parent.objects.filter(pk=self.one.pk).alias(
+                    rows=DerivedRelation(source.filter(parent=self.one))
+                )
+                self.assertEqual(tuple(joined.query.annotations), ("rows__sequence",))
+                self.assertEqual(
+                    list(joined.values_list("rows__sequence", flat=True)), [1]
+                )
+                with self.assertRaises(FieldError):
+                    joined.values("rows__amount")
+
+    def test_invalid_deferred_source_fields_use_native_validation(self) -> None:
+        for source in (
+            Child.objects.only("unknown"),
+            Child.objects.defer("unknown"),
+            Child.objects.only("parent__unknown"),
+        ):
+            with self.subTest(deferred_loading=source.query.deferred_loading):
+                with self.assertRaises(FieldDoesNotExist):
+                    source.query.get_compiler(connection=connection).get_select()
+                with self.assertRaises(FieldDoesNotExist):
+                    Parent.objects.alias(rows=DerivedRelation(source))
+
+    def test_inherited_deferred_source_preserves_parent_columns(self) -> None:
+        child = InheritedChild.objects.create(
+            parent=self.one, amount=40, sequence=3, label="extra"
+        )
+        source = InheritedChild.objects.only("amount", "label").filter(pk=child.pk)
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(source)
+        )
+        self.assertEqual(
+            tuple(joined.query.annotations),
+            ("rows__amount", "rows__child_ptr_id", "rows__label"),
+        )
+        self.assertEqual(
+            list(
+                joined.values_list("rows__amount", "rows__child_ptr_id", "rows__label")
+            ),
+            [(40, child.pk, "extra")],
+        )
+        with self.assertRaises(FieldError):
+            joined.values("rows__sequence")
+
+    def test_composite_primary_key_deferred_source_has_individual_columns(self) -> None:
+        CompositeChild.objects.create(parent=self.one, amount=40, sequence=3)
+        source = CompositeChild.objects.only("amount").filter(parent=self.one)
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(source)
+        )
+        self.assertEqual(
+            tuple(joined.query.annotations),
+            ("rows__parent_id", "rows__amount", "rows__sequence"),
+        )
+        self.assertEqual(
+            list(
+                joined.values_list("rows__parent_id", "rows__amount", "rows__sequence")
+            ),
+            [(self.one.pk, 40, 3)],
+        )
+        with self.assertRaisesMessage(ValueError, "individually named columns"):
+            Parent.objects.alias(rows=DerivedRelation(source.values("pk")))
 
     def test_ordinary_grouped_source(self) -> None:
         source = Child.objects.values("parent_id").annotate(total=Sum("amount"))
@@ -658,16 +819,13 @@ class DerivedRelationTests(TestCase):
         nested = Parent.objects.filter(pk__in=joined.values("pk"))
         self.assertEqual(nested.count(), 3)
 
+    def test_select_related_source_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            Parent.objects.alias(
+                rows=DerivedRelation(Child.objects.select_related("parent"))
+            )
+
     def test_unsupported_source_shapes(self) -> None:
-        sources = (
-            Child.objects.select_related("parent"),
-            Child.objects.only("amount"),
-            Child.objects.defer("amount"),
-        )
-        for source in sources:
-            with self.subTest(source=source.query.deferred_loading):
-                with self.assertRaises(ValueError):
-                    Parent.objects.alias(rows=DerivedRelation(source))
         with self.assertRaises(NotSupportedError):
             Parent.objects.alias(
                 rows=DerivedRelation(Child.objects.all().union(Child.objects.all()))

@@ -14,3 +14,15 @@ class Child(models.Model):
     parent = models.ForeignKey(Parent, models.CASCADE, related_name="children")
     amount = models.IntegerField()
     sequence = models.IntegerField()
+
+
+class InheritedChild(Child):
+    label = models.CharField(max_length=20)
+
+
+class CompositeChild(models.Model):
+    objects = DerivedQuerySet.as_manager()
+    pk = models.CompositePrimaryKey("parent_id", "sequence")
+    parent = models.ForeignKey(Parent, models.CASCADE)
+    amount = models.IntegerField()
+    sequence = models.IntegerField()
