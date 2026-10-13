@@ -13,9 +13,11 @@ Why this is needed
 
 Sometimes the thing you need to join is a query result: the latest exchange
 rate for each invoice, or sales totals grouped by product and warehouse.
-Django's relationship joins start from model tables. ``FilteredRelation`` can
-add an ON condition, but cannot replace the joined table with an ordered,
-limited, or grouped queryset.
+Django's relationship joins start from model tables. ``FilteredRelation``
+restricts which related rows match by adding an ON condition. It can even
+select the latest related row using a scalar ``Subquery`` in that condition.
+However, it cannot directly replace the joined table with a queryset that
+applies ``ORDER BY ... LIMIT``, grouping, or a custom projection.
 
 A scalar ``Subquery`` works when you need one column. If you need several
 columns from the same selected row, you often end up repeating that subquery.
