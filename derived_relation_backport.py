@@ -8,13 +8,21 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
-from django.db import NotSupportedError
+from django.db import NotSupportedError, models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Col, ColPairs
 from django.db.models.query_utils import Q, refs_expression
 from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
 from django.db.models.sql.query import Query
+
+if hasattr(models, "DerivedRelation"):
+    raise ImportError(
+        "Django already provides DerivedRelation. "
+        "Use django.db.models.DerivedRelation and replace DerivedQuerySet "
+        "with django.db.models.QuerySet."
+    )
+
 
 if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper

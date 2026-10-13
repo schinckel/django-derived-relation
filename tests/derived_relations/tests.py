@@ -1,10 +1,12 @@
 import pickle
+import runpy
 from datetime import date
 from decimal import Decimal
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.core.exceptions import FieldError
-from django.db import NotSupportedError, connection
+from django.db import NotSupportedError, connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import (
     Count,
@@ -22,6 +24,7 @@ from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.query import Query
 from django.test import SimpleTestCase, TestCase
 
+import derived_relation_backport
 from derived_relation_backport import DerivedRelation
 
 from .models import Child, Parent
@@ -572,6 +575,13 @@ class DerivedRelationTests(TestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_import_rejected_when_django_provides_derived_relation(self) -> None:
+        with patch.object(models, "DerivedRelation", object(), create=True):
+            with self.assertRaisesMessage(
+                ImportError, "Use django.db.models.DerivedRelation"
+            ):
+                runpy.run_path(derived_relation_backport.__file__)
+
     def test_empty_relation_and_projection_names_rejected(self) -> None:
         with self.assertRaisesMessage(ValueError, "nonempty"):
             Parent.objects.alias(

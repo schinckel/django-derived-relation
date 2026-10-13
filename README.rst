@@ -16,7 +16,7 @@ tested.
 Installation
 ============
 
-Install with ``python -m pip install .`` from this checkout. Import
+Install from PyPI with ``python -m pip install django-derived-relation``. Import
 ``DerivedRelation`` and ``DerivedQuerySet`` from ``derived_relation_backport``.
 The module is self-contained and does not require a patched Django installation.
 
@@ -239,7 +239,10 @@ Restrictions
 Moving to Django's core implementation
 ======================================
 
-Once your installed Django provides ``DerivedRelation``, import it from
+The backport raises ``ImportError`` at import time when Django exposes
+``django.db.models.DerivedRelation``, so applications must migrate to the core
+implementation. Once your installed Django provides ``DerivedRelation``,
+import it from
 ``django.db.models``. For an application queryset with custom methods, change
 its base from the backport's ``DerivedQuerySet`` to Django's ``QuerySet`` and
 retain those methods and manager configuration. An outer model using only
@@ -257,7 +260,7 @@ and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. SQLite validation can be run with
 ``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
 
-The 51 regression tests cover ordinary and LATERAL joins, typed projections,
+The 52 regression tests cover ordinary and LATERAL joins, typed projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests each supported series and Django's development branch.
