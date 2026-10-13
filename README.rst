@@ -288,14 +288,20 @@ Publishing releases
 
 The ``release.yml`` workflow runs the regression matrix, verifies the version
 tag, builds a wheel and source distribution, validates their metadata, and
-publishes through PyPI Trusted Publishing. It runs when a GitHub release is
-published. Routine pushes only run tests.
+publishes through PyPI Trusted Publishing when a ``v<version>`` tag is pushed.
+Routine branch pushes only run tests.
 
 PyPI Trusted Publishing is configured for this repository’s ``release.yml``
 workflow and the GitHub ``pypi`` environment. No PyPI API token is needed.
 
 For each release, update ``project.version`` in ``pyproject.toml``, commit and
-push the change, then publish a GitHub release with the corresponding
-``v<version>`` tag (for example ``v0.1.0``). PyPI versions cannot be replaced;
+push the change, then create and push the corresponding tag:
+
+.. code-block:: shell
+
+    git tag v0.1.0
+    git push origin v0.1.0
+
+The tag must match the package version. PyPI versions cannot be replaced;
 use a new version for subsequent uploads. Download the built distributions
 from the workflow artifacts if publication needs investigation.
