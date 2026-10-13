@@ -454,7 +454,8 @@ future versions require compatibility testing and may need adapter updates.
 
 This implementation originated in an experimental Django core implementation.
 It uses internal query/compiler APIs, with adapters scoped to DerivedQuerySet.
-Code derived from Django retains Django's BSD license and attribution.
+This project is licensed by Matthew Schinckel under the BSD 3-Clause license.
+The copyright notice for code derived from Django is retained in ``LICENSE``.
 
 Publishing releases
 ===================
