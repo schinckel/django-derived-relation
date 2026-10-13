@@ -25,7 +25,7 @@ from django.db.models.sql.query import Query
 from django.test import SimpleTestCase, TestCase
 
 import django_derived_relation
-from django_derived_relation import DerivedRelation
+from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
 
 from .models import Child, Parent
 
@@ -50,6 +50,36 @@ class DerivedRelationTests(TestCase):
         Child.objects.create(parent=cls.one, amount=10, sequence=1)
         Child.objects.create(parent=cls.many, amount=20, sequence=1)
         Child.objects.create(parent=cls.many, amount=30, sequence=2)
+
+    def test_mixin_preserves_custom_queryset_and_manager(self) -> None:
+        class ExistingQuerySet(QuerySet):
+            def named(self, name: str) -> QuerySet:
+                return self.filter(name=name)
+
+        class CustomQuerySet(DerivedQuerySetMixin, ExistingQuerySet):
+            pass
+
+        manager = CustomQuerySet.as_manager()
+        manager.model = Parent
+        source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
+        joined = manager.named("many").alias(
+            floor=F("minimum"),
+            rows=DerivedRelation(source, lateral=True),
+            chosen=F("rows__amount"),
+        )
+        self.assertIsInstance(joined.all(), CustomQuerySet)
+        self.assertEqual(
+            list(
+                joined.named("many")
+                .order_by("rows__amount")
+                .values_list("rows__amount", flat=True)
+            ),
+            [20, 30],
+        )
+        with self.assertRaises(NotSupportedError):
+            joined.update(minimum=1)
+        with self.assertRaises(NotSupportedError):
+            joined.delete()
 
     def test_left_join_retains_cardinality_without_column_references(self) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")

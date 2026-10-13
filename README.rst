@@ -38,11 +38,28 @@ Install from PyPI with ``python -m pip install django-derived-relation``.
 
 Import ``DerivedRelation`` and ``DerivedQuerySet`` from ``django_derived_relation``.
 
-The outer model's manager must use ``DerivedQuerySet``. Source querysets may
-use ordinary Django managers. If you already have a custom queryset, make
-``DerivedQuerySet`` its base and expose it with ``as_manager()`` or
-``Manager.from_queryset()``. The examples below show the manager on each outer
-model.
+The outer model's manager needs the derived-query adapter. Use
+``DerivedQuerySet.as_manager()`` for a new queryset. Source querysets can use
+ordinary Django managers.
+
+If you already have a custom queryset, add ``DerivedQuerySetMixin`` before its
+existing base so the adapter's methods run before delegating through ``super()``:
+
+.. code-block:: python
+
+    from django_derived_relation import DerivedQuerySetMixin
+
+
+    class InvoiceQuerySet(DerivedQuerySetMixin, ExistingInvoiceQuerySet):
+        pass
+
+
+    class Invoice(models.Model):
+        objects = InvoiceQuerySet.as_manager()
+
+``Manager.from_queryset(InvoiceQuerySet)`` also works. Existing queryset
+overrides must cooperate with ``super()``. ``DerivedQuerySet`` is just the
+convenience class combining the mixin with Django's ``QuerySet``.
 
 The descriptor alone cannot integrate with older Django's alias registration,
 column selection, aggregation, and resolution paths. The module therefore
@@ -59,10 +76,12 @@ model relationship. The joined source remains the related model's table; each
 matching model row can produce a result row.
 
 Use ``DerivedRelation`` when a queryset needs to define the joined rows and
-columns. ``FilteredRelation`` cannot itself apply a projection, grouping,
-ordering, or limit to that source. Ordering and slicing the outer queryset
-sort and limit the complete result, not the related rows separately for every
-outer row.
+columns. The source can use ``values()`` to select columns,
+``values(...).annotate(...)`` to group and calculate aggregates, and
+``order_by(...)[:1]`` to select its first row. ``FilteredRelation`` does not
+accept such a queryset as its joined source; it adds an ON condition to a
+model-table join. Ordering and slicing the outer queryset sort and limit the
+complete result, not the related rows separately for every outer row.
 
 Some results can be obtained either way. For example, a scalar ``Subquery``
 in a ``FilteredRelation`` condition can choose the newest child's primary key,
@@ -303,7 +322,9 @@ implementation. Once your installed Django provides ``DerivedRelation``,
 import it from
 ``django.db.models``. For an application queryset with custom methods, change
 its base from the backport's ``DerivedQuerySet`` to Django's ``QuerySet`` and
-retain those methods and manager configuration. An outer model using only
+retain those methods and manager configuration. If you used
+``DerivedQuerySetMixin``, remove it from the bases of your custom queryset.
+An outer model using only
 ``DerivedQuerySet.as_manager()`` can return to its ordinary Django manager.
 The relation definitions and ``alias__column`` references use the same public
 API.
@@ -318,7 +339,7 @@ and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. SQLite validation can be run with
 ``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
 
-The 52 regression tests cover ordinary and LATERAL joins, typed projections,
+The 53 regression tests cover ordinary and LATERAL joins, typed projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development

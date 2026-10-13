@@ -498,8 +498,8 @@ class DerivedQueryMixin:
         super().combine(rhs, connector)
 
 
-class DerivedQuerySet(QuerySet):
-    """Opt-in queryset adapter; no global Django classes are patched."""
+class DerivedQuerySetMixin:
+    """Add derived joins to a queryset; place before its base in the MRO."""
 
     def __init__(
         self,
@@ -537,7 +537,7 @@ class DerivedQuerySet(QuerySet):
                     )
                 value.add_to_query(clone.query, name)
             else:
-                clone = super(DerivedQuerySet, clone)._annotate(
+                clone = super(DerivedQuerySetMixin, clone)._annotate(
                     (), {name: value}, select
                 )
         return clone
@@ -555,3 +555,7 @@ class DerivedQuerySet(QuerySet):
                 "Calling delete() with DerivedRelation is not supported."
             )
         return super().delete()
+
+
+class DerivedQuerySet(DerivedQuerySetMixin, QuerySet):
+    """Convenience queryset with derived joins; no global classes are patched."""
