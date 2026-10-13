@@ -301,7 +301,7 @@ the three annotations. ``Distance`` returns GeoDjango distance objects; use
 This measures straight-line distance, not travel time.
 
 Regions covering each address
-----------------------------
+-----------------------------
 
 .. code-block:: python
 
