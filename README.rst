@@ -468,8 +468,22 @@ Routine branch pushes only run tests.
 PyPI Trusted Publishing is configured for this repository’s ``release.yml``
 workflow and the GitHub ``pypi`` environment. No PyPI API token is needed.
 
-For each release, update ``project.version`` in ``pyproject.toml``, commit and
-push the change, then create and push the corresponding tag:
+Record user-visible changes under ``Unreleased`` in ``CHANGES.rst`` as they
+are made. Before releasing, move those entries under a heading such as
+``0.1.0 (2026-10-13)``, using the actual release date, and leave an empty
+``Unreleased`` section for the next changes.
+
+Update ``project.version`` in ``pyproject.toml`` in the same commit. Version
+bumps are manual for now; there is only one version value to change. Check the
+release metadata before committing and pushing:
+
+.. code-block:: shell
+
+    RELEASE_TAG=v0.1.0 python tools/check_release.py
+
+The check requires a matching version tag and a dated changelog heading.
+It also runs before publication. Once that passes, commit and push the changes,
+then create and push the corresponding tag:
 
 .. code-block:: shell
 

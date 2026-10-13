@@ -59,4 +59,5 @@ jobs:
       - run: python -m black --check .
       - run: python -m isort --check-only .
       - run: python -m flake8 .
-      - run: python -m sphinxlint README.rst
+      - run: python -m sphinxlint README.rst CHANGES.rst
+      - run: python -m unittest discover -s tests -p test_release.py
