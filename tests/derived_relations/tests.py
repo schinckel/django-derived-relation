@@ -24,8 +24,8 @@ from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.query import Query
 from django.test import SimpleTestCase, TestCase
 
-import derived_relation_backport
-from derived_relation_backport import DerivedRelation
+import django_derived_relation
+from django_derived_relation import DerivedRelation
 
 from .models import Child, Parent
 
@@ -580,7 +580,7 @@ class DerivedRelationValidationTests(SimpleTestCase):
             with self.assertRaisesMessage(
                 ImportError, "Use django.db.models.DerivedRelation"
             ):
-                runpy.run_path(derived_relation_backport.__file__)
+                runpy.run_path(django_derived_relation.__file__)
 
     def test_empty_relation_and_projection_names_rejected(self) -> None:
         with self.assertRaisesMessage(ValueError, "nonempty"):

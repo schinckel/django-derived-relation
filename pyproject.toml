@@ -19,7 +19,7 @@ Repository = "https://github.com/schinckel/django-derived-relation"
 test = ["psycopg[binary]>=3.2", "black", "isort", "flake8"]
 
 [tool.setuptools]
-py-modules = ["derived_relation_backport"]
+py-modules = ["django_derived_relation"]
 
 [tool.isort]
 profile = "black"

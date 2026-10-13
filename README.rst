@@ -17,7 +17,7 @@ Installation
 ============
 
 Install from PyPI with ``python -m pip install django-derived-relation``. Import
-``DerivedRelation`` and ``DerivedQuerySet`` from ``derived_relation_backport``.
+``DerivedRelation`` and ``DerivedQuerySet`` from ``django_derived_relation``.
 The module is self-contained and does not require a patched Django installation.
 
 The outer model's manager must use ``DerivedQuerySet``. Source querysets may
@@ -65,7 +65,7 @@ reports. There is no fixed invoice-to-rate foreign key::
     from django.db import models
     from django.db.models import F, OuterRef
 
-    from derived_relation_backport import DerivedQuerySet, DerivedRelation
+    from django_derived_relation import DerivedQuerySet, DerivedRelation
 
 
     class Invoice(models.Model):
@@ -122,7 +122,7 @@ and warehouse; it is a query result, not a sales-line model instance::
     from django.db import models
     from django.db.models import F, Q, Sum
 
-    from derived_relation_backport import DerivedQuerySet, DerivedRelation
+    from django_derived_relation import DerivedQuerySet, DerivedRelation
 
 
     class StockSnapshot(models.Model):
