@@ -29,16 +29,14 @@ This gives the ORM another way to express the query. Whether it is faster
 depends on the data and execution plan.
 
 This backport targets Django 5.2 and later releases before the core feature is
-available. PostgreSQL is required. Future Django releases require regression
-verification; the target range does not mean unreleased versions have been
-tested.
+available. PostgreSQL is required.
 
 Installation
 ============
 
-Install from PyPI with ``python -m pip install django-derived-relation``. Import
-``DerivedRelation`` and ``DerivedQuerySet`` from ``django_derived_relation``.
-The module is self-contained and does not require a patched Django installation.
+Install from PyPI with ``python -m pip install django-derived-relation``.
+
+Import ``DerivedRelation`` and ``DerivedQuerySet`` from ``django_derived_relation``.
 
 The outer model's manager must use ``DerivedQuerySet``. Source querysets may
 use ordinary Django managers. If you already have a custom queryset, make
@@ -49,7 +47,9 @@ model.
 The descriptor alone cannot integrate with older Django's alias registration,
 column selection, aggregation, and resolution paths. The module therefore
 includes query and compiler subclasses attached to the opt-in queryset. It
-does not monkey-patch Django classes or backend features globally.
+does not monkey-patch Django classes or backend features globally. If/when you
+upgrade to a version of django that includes ``DerivedRelation``, you must
+uninstall this package and use the django supplied one.
 
 Choosing between FilteredRelation and DerivedRelation
 =====================================================
@@ -243,22 +243,56 @@ semantics.
 Restrictions
 ============
 
-* PostgreSQL is required; other backends raise ``NotSupportedError``.
-* Register the relation with ``alias()`` on ``DerivedQuerySet``. Registering it
-  with ``annotate()`` is unsupported.
-* Updating or deleting a queryset containing a derived relation is unsupported.
-* Relation and projected column names must be nonempty and cannot contain
-  periods or ``__``. Rename traversed fields with
-  ``values(name=F("related__field"))``.
-* Sources using ``select_related()``, ``only()``, or ``defer()`` require an
-  explicit values projection. Combined querysets and row-locking queries cannot
-  be used as sources.
-* Derived relations do not hydrate related model instances through
-  ``select_related()``. Table-valued functions, raw SQL sources, right/full
-  joins, and root FROM replacement are unsupported.
-* Boolean combinations of outer querysets with ``&``, ``|``, or ``^`` are
-  unsupported; combine filter conditions with ``Q`` instead.
-* Explicit source and outer database aliases must match.
+Currently unsupported
+---------------------
+
+These are implementation limits, not claims that the SQL is impossible.
+Listing them here does not promise future support.
+
+* Backends other than PostgreSQL.
+* Combined sources using ``union()``, ``intersection()``, or ``difference()``.
+  A union of compatible ``values()`` projections is a valid derived-table
+  shape, but the adapter does not yet support it.
+* Sources using ``select_for_update()``. Some derived sources could lock their
+  underlying rows; others, such as grouped or union results, cannot. The
+  current blanket rejection is broader than PostgreSQL's restrictions.
+* Updating or deleting an outer queryset containing a derived relation, or
+  combining outer querysets with ``&``, ``|``, or ``^``. Use ``Q`` trees for
+  combined filter conditions.
+* Hydrating joined model instances through ``select_related()``, table-valued
+  functions, raw SQL sources, right/full joins, and replacing the root FROM
+  source.
+* Forward references to derived aliases. Register dependencies first.
+
+The current API also requires ``alias()`` on ``DerivedQuerySet`` rather than
+``annotate()``. Sources using ``select_related()``, ``only()``, or ``defer()``
+need an explicit values projection. Relation and column names must be nonempty,
+cannot contain periods or ``__``, and must not create ambiguous aliases.
+Rename traversed columns with ``values(name=F("related__field"))``. Explicit
+source and outer database aliases must match, even if two aliases happen to
+point to the same database.
+
+Will never work
+---------------
+
+These require a different query or API, rather than lifting an adapter check.
+
+* An ordinary, non-LATERAL source referring to another FROM item in the same
+  query. That correlation requires ``lateral=True``.
+* Circular dependencies between derived sources. LATERAL sources can depend
+  on preceding sources, not on each other recursively.
+* Joining across independent database connections in one SQL statement.
+  Tables exposed to one connection through database facilities are a different
+  case; Django cannot merge the results of two connections into this join.
+* Referencing a column the source does not project. Include it in ``values()``
+  or give the expression a projected name first.
+* Passing the result of ``aggregate()``, an evaluated list, or a dictionary
+  as the source. This API needs a queryset that can compile into SQL; use
+  ``values(...).annotate(...)`` for grouped results.
+
+PostgreSQL also rejects row locking for shapes such as grouped and combined
+results, even if support for other locking sources is added. See its
+`SELECT documentation <https://www.postgresql.org/docs/current/sql-select.html>`_.
 
 Moving to Django's core implementation
 ======================================
