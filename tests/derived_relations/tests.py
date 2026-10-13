@@ -697,6 +697,41 @@ class DerivedRelationTests(TestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_registration_rejects_model_field_collisions(self) -> None:
+        relation = DerivedRelation(Child.objects.values("amount"))
+        for queryset, names in (
+            (Parent.objects.all(), ("name", "pk", "id")),
+            (Parent.objects.values("pk"), ("name", "pk", "id")),
+            (Child.objects.all(), ("parent", "parent_id")),
+        ):
+            for method in ("alias", "annotate"):
+                for name in names:
+                    with self.subTest(model=queryset.model, method=method, name=name):
+                        with self.assertRaisesMessage(
+                            ValueError, "conflicts with a model field"
+                        ):
+                            getattr(queryset, method)(**{name: relation})
+
+    def test_registration_rejects_existing_expression_names(self) -> None:
+        relation = DerivedRelation(Child.objects.values("amount"))
+        for existing_method in ("alias", "annotate"):
+            original = getattr(Parent.objects, existing_method)(rows=Value(7))
+            for method in ("alias", "annotate"):
+                with self.subTest(existing=existing_method, method=method):
+                    with self.assertRaisesMessage(ValueError, "already in use"):
+                        getattr(original, method)(rows=relation)
+                    self.assertEqual(original.query.annotations["rows"].value, 7)
+                    self.assertFalse(original.query.derived_relations)
+
+    def test_registration_rejects_earlier_expression_in_same_call(self) -> None:
+        relation = DerivedRelation(Child.objects.values("amount"))
+        for method in ("alias", "annotate"):
+            with self.subTest(method=method):
+                with self.assertRaisesMessage(ValueError, "conflict with aliases"):
+                    getattr(Parent.objects, method)(
+                        **{"rows__amount": Value(7), "rows": relation}
+                    )
+
     def test_import_rejected_when_django_provides_derived_relation(self) -> None:
         with patch.object(models, "DerivedRelation", object(), create=True):
             with self.assertRaisesMessage(

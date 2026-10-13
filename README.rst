@@ -458,7 +458,7 @@ and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. SQLite validation can be run with
 ``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
 
-The 57 regression tests cover ordinary and LATERAL joins, typed projections,
+The 60 regression tests cover ordinary and LATERAL joins, typed projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development
