@@ -2,7 +2,6 @@
 
 import os
 import sys
-from pathlib import Path
 
 import django
 from django.conf import settings
@@ -10,7 +9,6 @@ from django.test.runner import DiscoverRunner
 
 
 def main() -> int:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     sqlite = "--sqlite" in sys.argv
     database = (
         {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}

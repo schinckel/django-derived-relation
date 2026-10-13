@@ -267,7 +267,15 @@ create the isolated test database. SQLite validation can be run with
 The 52 regression tests cover ordinary and LATERAL joins, typed projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
-and 6.1.2. CI tests each supported series and Django's development branch.
+and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development
+main on Python 3.12–3.14. The same matrix runs weekly to catch upstream changes.
+Each environment installs the built wheel and runs PostgreSQL and SQLite tests.
+
+Run the matrix locally with ``python -m pip install tox`` followed by
+``tox``. All listed Python interpreters must be installed. To run one
+combination, use ``tox -e py313-django52``. PostgreSQL connection settings are
+passed through from the ``PG*`` environment variables. Tox runs environments
+sequentially; avoid ``tox -p`` because the runner uses a shared test database.
 Support is intended to continue from Django 5.2 until the feature reaches core;
 future versions require compatibility testing and may need adapter updates.
 
