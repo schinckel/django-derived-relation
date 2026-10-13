@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-derived-relation"
+version = "0.1.0"
+description = "Ordinary and lateral derived-query joins for Django"
+readme = "README.rst"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+dependencies = ["Django>=5.2"]
+
+[project.urls]
+Repository = "https://github.com/schinckel/django-derived-relation"
+
+[project.optional-dependencies]
+test = ["psycopg[binary]>=3.2", "black", "isort", "flake8"]
+
+[tool.setuptools]
+py-modules = ["derived_relation_backport"]
+
+[tool.isort]
+profile = "black"
+
+[tool.black]
+target-version = ["py310"]
