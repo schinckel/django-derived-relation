@@ -60,7 +60,9 @@ Historical rates without a declared relationship
 An invoice stores its currency and issue date. A separate feed supplies
 historical rates identified by currency codes. The reporting currency is chosen
 by the caller, so the appropriate rate for an invoice can change between
-reports. There is no fixed invoice-to-rate foreign key::
+reports. There is no fixed invoice-to-rate foreign key:
+
+.. code-block:: python
 
     from django.db import models
     from django.db.models import F, OuterRef
@@ -115,7 +117,9 @@ Joining grouped results
 
 Suppose an inventory report joins a stock snapshot with sales totals for a
 caller-selected period. Each total combines several sales lines for one product
-and warehouse; it is a query result, not a sales-line model instance::
+and warehouse; it is a query result, not a sales-line model instance:
+
+.. code-block:: python
 
     from datetime import date
 
