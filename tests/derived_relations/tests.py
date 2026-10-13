@@ -76,10 +76,102 @@ class DerivedRelationTests(TestCase):
             ),
             [20, 30],
         )
+        annotated = manager.annotate(
+            rows=DerivedRelation(source, lateral=True), chosen=F("rows__amount")
+        ).named("many")
+        self.assertIsInstance(annotated.all(), CustomQuerySet)
+        self.assertEqual([row.chosen for row in annotated.order_by("chosen")], [20, 30])
         with self.assertRaises(NotSupportedError):
             joined.update(minimum=1)
         with self.assertRaises(NotSupportedError):
             joined.delete()
+
+    def test_annotate_registration_matches_alias_on_conditions(self) -> None:
+        source = Child.objects.values("parent_id", "amount")
+        for join_type, expected in (
+            ("left", [("empty", None), ("many", 30), ("one", None)]),
+            ("inner", [("many", 30)]),
+        ):
+            with self.subTest(join_type=join_type):
+                relation = DerivedRelation(
+                    source,
+                    join_type=join_type,
+                    condition=Q(rows__parent_id=F("pk"), rows__amount__gt=20),
+                )
+                for register in (Parent.objects.alias, Parent.objects.annotate):
+                    joined = register(rows=relation)
+                    self.assertEqual(
+                        list(
+                            joined.order_by("name").values_list("name", "rows__amount")
+                        ),
+                        expected,
+                    )
+
+    def test_annotate_registration_retains_unselected_join(self) -> None:
+        joined = Parent.objects.annotate(
+            rows=DerivedRelation(self.source(), lateral=True)
+        )
+        self.assertEqual(joined.count(), 4)
+        self.assertEqual(joined.aggregate(total=Count("pk")), {"total": 4})
+        instances = list(joined.order_by("name"))
+        self.assertEqual(
+            [row.name for row in instances], ["empty", "many", "many", "one"]
+        )
+        for row in instances:
+            self.assertFalse(hasattr(row, "rows"))
+            self.assertFalse(hasattr(row, "rows__amount"))
+
+    def test_annotate_mixed_expressions_preserve_selection_and_order(self) -> None:
+        source = Child.objects.filter(
+            parent_id=OuterRef("pk"), amount__gte=OuterRef("floor")
+        ).values("amount")
+        annotated = Parent.objects.annotate(
+            floor=F("minimum") + Value(15),
+            rows=DerivedRelation(source, lateral=True),
+            chosen=F("rows__amount"),
+        )
+        self.assertEqual(
+            [
+                (row.name, row.floor, row.chosen)
+                for row in annotated.order_by("name", "chosen")
+            ],
+            [
+                ("empty", 15, None),
+                ("many", 15, 20),
+                ("many", 15, 30),
+                ("one", 15, None),
+            ],
+        )
+        aliased = Parent.objects.alias(
+            floor=F("minimum") + Value(15),
+            rows=DerivedRelation(source, lateral=True),
+            chosen=F("rows__amount"),
+        ).annotate(chosen_value=F("chosen"))
+        self.assertEqual(
+            [
+                (row.name, row.chosen_value)
+                for row in aliased.order_by("name", "chosen_value")
+            ],
+            [("empty", None), ("many", 20), ("many", 30), ("one", None)],
+        )
+        self.assertFalse(hasattr(aliased.first(), "floor"))
+        self.assertFalse(hasattr(aliased.first(), "chosen"))
+
+    def test_annotate_registration_resolves_preceding_relation(self) -> None:
+        newest = self.source().order_by("-sequence").values("amount")[:1]
+        dependent = Child.objects.filter(
+            parent_id=OuterRef("pk"), amount=OuterRef("newest__amount")
+        ).values("sequence")
+        joined = Parent.objects.annotate(
+            newest=DerivedRelation(newest, lateral=True),
+            match=DerivedRelation(dependent, lateral=True),
+            chosen=F("newest__amount"),
+            sequence=F("match__sequence"),
+        )
+        self.assertEqual(
+            list(joined.order_by("name").values_list("name", "chosen", "sequence")),
+            [("empty", None, None), ("many", 30, 2), ("one", 10, 1)],
+        )
 
     def test_left_join_retains_cardinality_without_column_references(self) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
@@ -629,8 +721,11 @@ class DerivedRelationValidationTests(SimpleTestCase):
             DerivedRelation(Child.objects.all(), join_type="right")
         with self.assertRaises(TypeError):
             DerivedRelation(Child.objects.all(), condition=Value(1))
-        with self.assertRaisesMessage(TypeError, "alias()"):
-            Parent.objects.annotate(rows=DerivedRelation(Child.objects.all()))
+        relation = DerivedRelation(Child.objects.all())
+        with self.assertRaises(TypeError):
+            Parent.objects.annotate(relation)
+        with self.assertRaisesMessage(TypeError, "registered"):
+            Parent.objects.annotate(value=F("minimum") + relation)
 
     def test_unsupported_backend(self) -> None:
         if getattr(

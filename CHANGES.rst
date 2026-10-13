@@ -4,6 +4,9 @@ Changelog
 Unreleased
 ----------
 
+* Allow registering ``DerivedRelation`` with ``annotate()`` as well as
+  ``alias()``, without selecting the descriptor itself.
+
 0.1.0 (2026-10-13)
 ------------------
 

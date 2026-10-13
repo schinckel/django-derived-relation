@@ -68,6 +68,27 @@ does not monkey-patch Django classes or backend features globally. If/when you
 upgrade to a version of django that includes ``DerivedRelation``, you must
 uninstall this package and use the django supplied one.
 
+Registering a derived relation
+==============================
+
+Use ``alias()`` when registering the join on its own. ``annotate()`` also
+accepts ``DerivedRelation``, like Django's ``FilteredRelation``, and lets you
+select ordinary expressions alongside it:
+
+.. code-block:: python
+
+    source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
+    parents = Parent.objects.annotate(
+        rows=DerivedRelation(source, lateral=True),
+        amount=F("rows__amount"),
+    )
+
+Each instance has an ``amount`` attribute. The descriptor does not create a
+``rows`` attribute or hydrate a related model instance. Registering the join
+alone retains its effect on row counts through either method; ordinary
+``alias()`` expressions remain unselected and ordinary ``annotate()``
+expressions are selected.
+
 Choosing between FilteredRelation and DerivedRelation
 =====================================================
 
@@ -381,8 +402,8 @@ Listing them here does not promise future support.
   source.
 * Forward references to derived aliases. Register dependencies first.
 
-The current API also requires ``alias()`` on ``DerivedQuerySet`` rather than
-``annotate()``. Sources using ``select_related()``, ``only()``, or ``defer()``
+Registration requires ``DerivedQuerySet`` or ``DerivedQuerySetMixin``.
+Sources using ``select_related()``, ``only()``, or ``defer()``
 need an explicit values projection. Relation and column names must be nonempty,
 cannot contain periods or ``__``, and must not create ambiguous aliases.
 Rename traversed columns with ``values(name=F("related__field"))``. Explicit
@@ -437,7 +458,7 @@ and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. SQLite validation can be run with
 ``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
 
-The 53 regression tests cover ordinary and LATERAL joins, typed projections,
+The 57 regression tests cover ordinary and LATERAL joins, typed projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development

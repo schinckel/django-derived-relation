@@ -251,7 +251,10 @@ class DerivedRelation:
         self.source_db = queryset._db
 
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
-        raise TypeError("DerivedRelation must be registered with QuerySet.alias().")
+        raise TypeError(
+            "DerivedRelation must be registered with alias() or annotate(); "
+            "it cannot be used as a scalar expression."
+        )
 
     def _projection(self) -> Query:
         source = self.query.clone()
@@ -514,13 +517,6 @@ class DerivedQuerySetMixin:
     def _annotate(
         self, args: tuple[object, ...], kwargs: dict[str, object], select: bool = True
     ) -> QuerySet:
-        relations = {
-            name: value
-            for name, value in kwargs.items()
-            if isinstance(value, DerivedRelation)
-        }
-        if select and relations:
-            raise TypeError("DerivedRelation must be registered with alias().")
         clone = super()._annotate(args, {}, select)
         names = {
             name
