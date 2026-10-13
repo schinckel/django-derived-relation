@@ -830,10 +830,6 @@ class DerivedRelationTests(TestCase):
             Parent.objects.alias(
                 rows=DerivedRelation(Child.objects.all().union(Child.objects.all()))
             )
-        with self.assertRaises(NotSupportedError):
-            Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.select_for_update())
-            )
 
     def test_reject_correlated_nonlateral_source(self) -> None:
         with self.assertRaisesMessage(ValueError, "require lateral=True"):

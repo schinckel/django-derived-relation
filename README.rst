@@ -394,6 +394,57 @@ fetched through the derived alias. Foreign keys use their attnames, such as
 ``parent_id``, and composite primary keys expose their individual columns.
 Use explicit ``values()`` when output names matter.
 
+Locking source rows
+===================
+
+Sources can use ``select_for_update()`` where Django and PostgreSQL support
+row locking. Evaluate the outer queryset inside ``transaction.atomic()``;
+registration alone does not execute SQL or acquire locks.
+
+.. code-block:: python
+
+    from django.db import transaction
+
+    with transaction.atomic():
+        candidates = (
+            Child.objects.filter(parent_id=OuterRef("pk"))
+            .order_by("sequence")
+            .select_for_update(skip_locked=True)
+        )
+        rows = Parent.objects.alias(
+            locked=DerivedRelation(
+                candidates.values("id", "amount"), lateral=True
+            )
+        )
+        locked_rows = list(rows.values("pk", "locked__id", "locked__amount"))
+
+Source locks apply to the underlying source rows. They do not lock the outer
+model merely because it joins the source. Calling ``select_for_update()`` on
+the outer queryset is a separate operation, subject to Django's and
+PostgreSQL's normal restrictions on locking joined tables.
+
+A locking source routes the outer queryset through Django's write router,
+including when the lock is inside a nested derived source. Explicit outer
+``using()`` keeps its normal precedence; an explicit source database must
+still match the outer query's chosen database.
+
+Django compiles the source's ``nowait``, ``skip_locked``, ``of``, and ``no_key``
+options normally. ``nowait=True`` reports contention as a database error;
+``skip_locked=True`` omits locked source rows. A LEFT join still returns an
+outer row with NULL source columns when no source row can be locked. For
+``of=("self",)``, include at least one model field in the source's
+``values()`` projection. Django requires a selected field from each model
+named in ``of`` and validates which related field paths the query supports.
+
+Locks last until the transaction commits or rolls back. Predicates, slicing,
+query execution, and lock options determine which rows PostgreSQL visits;
+do not assume that every candidate row is locked. Known-empty sources preserve
+LEFT join rows through an empty SQL source and still require a transaction.
+Transaction checks, unsupported-option errors, and PostgreSQL errors propagate
+normally. PostgreSQL rejects locking grouped, aggregate, distinct, and
+set-operation results; adding a locking clause does not make those shapes
+lockable. Combined sources remain unsupported by this adapter.
+
 Restrictions
 ============
 
@@ -407,9 +458,6 @@ Listing them here does not promise future support.
 * Combined sources using ``union()``, ``intersection()``, or ``difference()``.
   A union of compatible ``values()`` projections is a valid derived-table
   shape, but the adapter does not yet support it.
-* Sources using ``select_for_update()``. Some derived sources could lock their
-  underlying rows; others, such as grouped or union results, cannot. The
-  current blanket rejection is broader than PostgreSQL's restrictions.
 * Updating or deleting an outer queryset containing a derived relation, or
   combining outer querysets with ``&``, ``|``, or ``^``. Use ``Q`` trees for
   combined filter conditions.
@@ -445,7 +493,7 @@ These require a different query or API, rather than lifting an adapter check.
   ``values(...).annotate(...)`` for grouped results.
 
 PostgreSQL also rejects row locking for shapes such as grouped and combined
-results, even if support for other locking sources is added. See its
+results. See its
 `SELECT documentation <https://www.postgresql.org/docs/current/sql-select.html>`_.
 
 Moving to Django's core implementation
@@ -476,6 +524,8 @@ create the isolated test database. SQLite validation can be run with
 
 The regression tests cover ordinary and LATERAL joins, typed and deferred projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
+Independent PostgreSQL connections verify source lock contention, lock options,
+and transaction release; database-free tests check write routing.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development
 main on Python 3.12–3.14. The same matrix runs weekly to catch upstream changes.

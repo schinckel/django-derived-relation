@@ -4,6 +4,10 @@ Changelog
 Unreleased
 ----------
 
+* Allow ``select_for_update()`` on ordinary and LATERAL sources, preserving
+  Django's transaction checks and lock options and PostgreSQL's source-row
+  locking restrictions.
+
 * Allow registering ``DerivedRelation`` with ``annotate()`` as well as
   ``alias()``, without selecting the descriptor itself.
 * Preserve native ``only()`` and ``defer()`` root-model column selection in
