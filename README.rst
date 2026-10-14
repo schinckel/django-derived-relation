@@ -378,6 +378,22 @@ recommended, although bare model querysets are accepted. Registration clones
 the source without evaluating it. It does not change scalar ``Subquery``
 semantics.
 
+Bare model sources preserve Django's ``only()`` and ``defer()`` selection,
+including implicitly selected primary-key columns and selected annotations.
+For example, ``Child.objects.only("amount")`` exposes ``rows__id`` and
+``rows__amount`` when registered as ``rows``. Filters, ordering, and LATERAL
+correlation can still use fields omitted from that projection. Native call-order
+rules apply: ``only()`` replaces the selected field set, ``defer()`` adds
+exclusions, and ``defer(None)`` clears them. A subsequent ``values()`` supplies
+its own explicit projection.
+
+This selects columns from the root model; it does not hydrate deferred model
+instances or joined related objects. An omitted column such as
+``rows__sequence`` raises ``FieldError`` when referenced and cannot be lazily
+fetched through the derived alias. Foreign keys use their attnames, such as
+``parent_id``, and composite primary keys expose their individual columns.
+Use explicit ``values()`` when output names matter.
+
 Restrictions
 ============
 
@@ -403,8 +419,8 @@ Listing them here does not promise future support.
 * Forward references to derived aliases. Register dependencies first.
 
 Registration requires ``DerivedQuerySet`` or ``DerivedQuerySetMixin``.
-Sources using ``select_related()``, ``only()``, or ``defer()``
-need an explicit values projection. Relation and column names must be nonempty,
+Sources using ``select_related()`` need an explicit values projection.
+Relation and column names must be nonempty,
 cannot contain periods or ``__``, and must not create ambiguous aliases.
 Rename traversed columns with ``values(name=F("related__field"))``. Explicit
 source and outer database aliases must match, even if two aliases happen to
@@ -458,7 +474,7 @@ and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. SQLite validation can be run with
 ``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
 
-The 60 regression tests cover ordinary and LATERAL joins, typed projections,
+The regression tests cover ordinary and LATERAL joins, typed and deferred projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
 and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development

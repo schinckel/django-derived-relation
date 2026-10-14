@@ -11,6 +11,7 @@ from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Col, ColPairs
+from django.db.models.fields import composite
 from django.db.models.query_utils import Q, refs_expression
 from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
@@ -259,9 +260,9 @@ class DerivedRelation:
     def _projection(self) -> Query:
         source = self.query.clone()
         source.__class__ = _query_class(type(source))
-        if source.select_related or source.deferred_loading != (frozenset(), True):
+        if source.select_related:
             raise ValueError(
-                "DerivedRelation sources using select_related(), only(), or defer() "
+                "DerivedRelation sources using select_related() "
                 "require an explicit values() projection."
             )
         if source.combinator:
@@ -273,8 +274,13 @@ class DerivedRelation:
                 "DerivedRelation sources cannot use select_for_update()."
             )
         if source.selected is None:
+            # Match Django's root-model selection, including implicit primary
+            # key components, before set_values() clears deferred loading.
+            select_mask = set(composite.unnest(source.get_select_mask()))
             names = source.values_select or tuple(
-                field.attname for field in source.model._meta.concrete_fields
+                field.attname
+                for field in source.model._meta.concrete_fields
+                if not select_mask or field in select_mask
             )
             source.set_values((*names, *source.annotation_select))
         if not source.selected:
