@@ -198,6 +198,36 @@ class DerivedRelationLockingTests(TransactionTestCase):
                     self._assert_unlocked(peer, self.parent)
                 self._assert_unlocked(peer, self.first)
 
+    @skipUnlessDBFeature("has_select_for_update_of")
+    def test_deferred_source_preserves_projection_and_locks(self) -> None:
+        for source in (
+            self._source(True).only("amount"),
+            self._source(True).defer("parent_id", "sequence"),
+        ):
+            with (
+                self.subTest(deferred=source.query.deferred_loading),
+                self._peer() as peer,
+            ):
+                joined = Parent.objects.filter(pk=self.parent.pk).alias(
+                    locked=DerivedRelation(
+                        source.select_for_update(of=("self",)), lateral=True
+                    )
+                )
+                with transaction.atomic():
+                    self.assertEqual(
+                        list(
+                            joined.order_by("locked__amount").values_list(
+                                "locked__amount", flat=True
+                            )
+                        ),
+                        [10, 20],
+                    )
+                    self._assert_locked(peer, self.first)
+                    self._assert_locked(peer, self.second)
+                    self._assert_unlocked(peer, self.parent)
+                    with self.assertRaises(FieldError):
+                        joined.values("locked__parent_id")
+
     def test_evaluation_outside_atomic_raises_native_transaction_error(self) -> None:
         self.assertTrue(connection.get_autocommit())
         for lateral in (False, True):
