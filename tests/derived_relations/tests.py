@@ -27,7 +27,7 @@ from django.test import SimpleTestCase, TestCase
 import django_derived_relation
 from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
 
-from .models import Child, CompositeChild, InheritedChild, Parent
+from .models import Child, CompositeChild, InheritedChild, NamedColumn, Parent
 
 
 class PostgreSQLSourceQuery(Query):
@@ -242,6 +242,28 @@ class DerivedRelationTests(TestCase):
         self.assertEqual(
             list(joined.order_by("name").values_list("rows__amount", flat=True)),
             [None, 30, 10],
+        )
+
+    def test_bare_source_exposes_field_name_for_custom_database_column(self) -> None:
+        NamedColumn.objects.create(value=40)
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(NamedColumn.objects.only("value"))
+        )
+        self.assertEqual(list(joined.values_list("rows__value", flat=True)), [40])
+        with self.assertRaises(FieldError):
+            joined.values("rows__stored_value")
+
+    def test_bare_source_preserves_extra_column_positions(self) -> None:
+        source = (
+            Child.objects.filter(parent=self.one)
+            .only("amount")
+            .extra(select={"bonus": "42"})
+        )
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(source)
+        )
+        self.assertEqual(
+            list(joined.values_list("rows__bonus", "rows__amount")), [(42, 10)]
         )
 
     def test_deferred_sources_match_native_root_columns(self) -> None:
@@ -845,6 +867,43 @@ class DerivedRelationTests(TestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_bare_source_rejects_ambiguous_column_names(self) -> None:
+        for source in (
+            Child.objects.extra(select={"id": "42"}),
+            Child.objects.extra(select={"amount": "42"}),
+            Child.objects.extra(select={"bonus": "42"}).annotate(bonus=Value(1)),
+        ):
+            with self.subTest(extra=source.query.extra_select):
+                with self.assertRaisesMessage(ValueError, "ambiguous column names"):
+                    Parent.objects.alias(rows=DerivedRelation(source))
+
+    def test_registration_preserves_native_source_projection(self) -> None:
+        bare = Child.objects.only("amount")
+        for source in (
+            bare,
+            bare.union(bare.union(bare)),
+            Child.objects.values("amount").union(bare),
+        ):
+            with self.subTest(selected=source.query.selected):
+                joined = Parent.objects.alias(rows=DerivedRelation(source))
+                pairs: list[tuple[Query, Query]] = [
+                    (source.query, joined.query.alias_map["rows"].source)
+                ]
+                while pairs:
+                    original, prepared = pairs.pop()
+                    self.assertEqual(prepared.selected, original.selected)
+                    self.assertEqual(prepared.default_cols, original.default_cols)
+                    self.assertEqual(
+                        prepared.deferred_loading, original.deferred_loading
+                    )
+                    pairs.extend(
+                        zip(
+                            original.combined_queries,
+                            prepared.combined_queries,
+                            strict=True,
+                        )
+                    )
+
     def test_deferred_combined_projection_keeps_implicit_primary_keys(self) -> None:
         source = Child.objects.only("amount").union(
             Child.objects.defer("parent", "sequence")

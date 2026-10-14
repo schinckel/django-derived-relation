@@ -431,6 +431,10 @@ fetched through the derived alias. Foreign keys use their attnames, such as
 ``parent_id``, and composite primary keys expose their individual columns.
 Use explicit ``values()`` when output names matter.
 
+Bare sources expose field attnames even when a field defines a different
+``db_column``. If ``extra()`` or annotations produce duplicate column names,
+use an explicit ``values()`` projection to make the output unambiguous.
+
 Locking source rows
 ===================
 

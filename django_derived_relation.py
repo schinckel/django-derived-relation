@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
 from django.db.models import Model, QuerySet
-from django.db.models.expressions import Col, ColPairs
-from django.db.models.fields import composite
+from django.db.models.expressions import Col, ColPairs, RawSQL
 from django.db.models.query_utils import Q, refs_expression
+from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
 from django.db.models.sql.query import Query
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from django.db.models.expressions import BaseExpression
     from django.db.models.fields import Field
     from django.db.models.lookups import Lookup
-    from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.where import WhereNode
 
 
@@ -118,6 +117,7 @@ class DerivedJoin(BaseTable):
         condition: WhereNode | None,
         join_type: str,
         lateral: bool,
+        column_names: tuple[str, ...],
         source_db: str | None = None,
     ) -> None:
         super().__init__(name, alias)
@@ -126,6 +126,7 @@ class DerivedJoin(BaseTable):
         self.condition = condition
         self.join_type = join_type
         self.lateral = lateral
+        self.column_names = column_names
         self.nullable = join_type == LOUTER
         self.source_db = source_db
 
@@ -148,7 +149,7 @@ class DerivedJoin(BaseTable):
             connection.vendor == "postgresql",
         ):
             raise NotSupportedError("This backend does not support LATERAL joins.")
-        source = _clone_source_query(self.source)
+        source = self.source.clone()
         try:
             sql, params = compiler.compile(source)
         except EmptyResultSet:
@@ -173,14 +174,12 @@ class DerivedJoin(BaseTable):
                 on_sql = "FALSE"
         lateral = " LATERAL" if self.lateral else ""
         alias_sql = compiler.connection.ops.quote_name(self.table_alias)
-        if self.source.combinator:
-            # Django may elide the first operand, so declare its names by position.
-            assert self.source.selected is not None
-            names = ", ".join(
-                compiler.connection.ops.quote_name(column)
-                for column in self.source.selected
-            )
-            alias_sql += f"({names})"
+        # Declare public names by position without changing the source's SELECT.
+        # This also preserves names when Django elides an empty first operand.
+        names = ", ".join(
+            compiler.connection.ops.quote_name(column) for column in self.column_names
+        )
+        alias_sql += f"({names})"
         return (
             f"{self.join_type}{lateral} {sql} " f"{alias_sql} ON ({on_sql})",
             (*params, *on_params),
@@ -209,6 +208,7 @@ class DerivedJoin(BaseTable):
             self.condition,
             self.join_type,
             self.lateral,
+            self.column_names,
             self.source_db,
         )
 
@@ -268,16 +268,47 @@ class DerivedRelation:
             "it cannot be used as a scalar expression."
         )
 
-    def _projection(self) -> Query:
-        source = _clone_source_query(self.query)
-        if not source.selected:
+    def _projection(self, source: Query) -> dict[str, BaseExpression]:
+        projection: dict[str, BaseExpression] = {}
+        if source.selected is None:
+            # get_default_columns() uses model/query metadata, without rendering
+            # SQL or choosing a database. Keep Django's deferred mask intact.
+            cols = (
+                SQLCompiler(source, None, None).get_default_columns(
+                    source.get_select_mask()
+                )
+                if source.default_cols
+                else source.select
+            )
+            selected: list[tuple[str, BaseExpression]] = [
+                *(
+                    (column, RawSQL(*args))
+                    for column, args in source.extra_select.items()
+                ),
+                *((col.target.attname, col) for col in cols),
+                *source.annotation_select.items(),
+            ]
+            projection = dict(selected)
+            if len(projection) != len(selected):
+                raise ValueError(
+                    "DerivedRelation source has ambiguous column names. "
+                    "Use an explicit values() projection."
+                )
+        else:
+            for column, expression in source.selected.items():
+                if isinstance(expression, int):
+                    expression = source.select[expression]
+                elif isinstance(expression, str):
+                    expression = source.annotations[expression]
+                projection[column] = expression
+        if not projection:
             raise ValueError("DerivedRelation requires at least one projected column.")
-        if any(not name or "__" in name or "." in name for name in source.selected):
+        if any(not name or "__" in name or "." in name for name in projection):
             raise ValueError(
                 "DerivedRelation column names must be nonempty and cannot "
                 "contain '__' or '.'."
             )
-        return source
+        return projection
 
     def add_to_query(self, query: Query, name: str) -> None:
         query.check_alias(name)
@@ -302,7 +333,9 @@ class DerivedRelation:
         ):
             raise ValueError(f"The relation name {name!r} is already in use.")
         parent_alias = query.get_initial_alias()
-        source = self._projection().resolve_expression(query)
+        source = self.query.clone()
+        _prepare_source_query(source)
+        source = source.resolve_expression(query)
         if not self.lateral and source.get_external_cols():
             raise ValueError("Correlated DerivedRelation sources require lateral=True.")
         alias, _ = query.table_alias(name, create=True)
@@ -323,6 +356,7 @@ class DerivedRelation:
             None,
             self.join_type,
             self.lateral,
+            tuple(column.column for column in columns.values()),
             self.source_db,
         )
         query.alias_map[alias] = join
@@ -337,11 +371,7 @@ class DerivedRelation:
 
     def _columns(self, source: Query, alias: str, name: str) -> dict[str, DerivedCol]:
         columns: dict[str, DerivedCol] = {}
-        for column, expression in source.selected.items():
-            if isinstance(expression, int):
-                expression = source.select[expression]
-            elif isinstance(expression, str):
-                expression = source.annotations[expression]
+        for column, expression in self._projection(source).items():
             if isinstance(expression, ColPairs):
                 raise ValueError("DerivedRelation requires individually named columns.")
             field = copy(expression.output_field)
@@ -389,39 +419,23 @@ def _has_source_locks(query: Query) -> bool:
     )
 
 
-def _clone_source_query(query: Query, fields: tuple[str, ...] | None = None) -> Query:
-    """Validate and adapt a cloned source tree without changing its operands."""
+def _prepare_source_query(query: Query) -> None:
+    """Adapt an already-cloned tree, preserving native source projections."""
     if query.select_related:
         raise ValueError(
             "DerivedRelation sources using select_related() "
             "require an explicit values() projection."
         )
-    clone = query.clone()
-    # Alias relabeling edits table_map lists; Query.clone() only copies the map.
-    clone.table_map = {table: aliases[:] for table, aliases in clone.table_map.items()}
-    clone.__class__ = _query_class(type(clone))
-    clone._derived_source_has_select_fields = query.has_select_fields
-    if clone.selected is not None:
-        clone.selected = clone.selected.copy()
-    if fields is not None and clone.selected is None:
-        clone.set_values(fields)
-    # Propagate explicit values() projections as Django does. An inferred
-    # projection must not clear a later operand's independent deferred mask.
-    selected = tuple(clone.selected) if clone.selected is not None else None
-    clone.combined_queries = tuple(
-        _clone_source_query(branch, selected) for branch in clone.combined_queries
-    )
-    if clone.selected is None:
-        # Match each operand's native selection, including implicit primary
-        # key components, before set_values() clears deferred loading.
-        select_mask = set(composite.unnest(clone.get_select_mask()))
-        names = clone.values_select or tuple(
-            field.attname
-            for field in clone.model._meta.concrete_fields
-            if not select_mask or field in select_mask
-        )
-        clone.set_values((*names, *clone.annotation_select))
-    return clone
+    if not isinstance(query, DerivedQueryMixin):
+        # Native Query.clone() doesn't copy these mutable containers deeply.
+        query.table_map = {
+            table: aliases[:] for table, aliases in query.table_map.items()
+        }
+        if query.selected is not None:
+            query.selected = query.selected.copy()
+        query.__class__ = _query_class(type(query))
+    for branch in query.combined_queries:
+        _prepare_source_query(branch)
 
 
 class DerivedCompilerMixin:
@@ -453,15 +467,6 @@ class DerivedCompilerMixin:
 
 class DerivedQueryMixin:
     derived_relations: frozenset[str] = frozenset()
-    _derived_source_has_select_fields: bool | None = None
-
-    @property
-    def has_select_fields(self) -> bool:
-        # Named source columns are an internal projection. Preserve Django's
-        # ordering rules for originally bare operands, including hidden columns.
-        if self._derived_source_has_select_fields is not None:
-            return self._derived_source_has_select_fields
-        return super().has_select_fields
 
     def clone(self) -> Query:
         clone = super().clone()

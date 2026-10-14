@@ -26,3 +26,7 @@ class CompositeChild(models.Model):
     parent = models.ForeignKey(Parent, models.CASCADE)
     amount = models.IntegerField()
     sequence = models.IntegerField()
+
+
+class NamedColumn(models.Model):
+    value = models.IntegerField(db_column="stored_value")
