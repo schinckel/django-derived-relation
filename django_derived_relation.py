@@ -250,6 +250,7 @@ class DerivedRelation:
         self.join_type = INNER if join_type == "inner" else LOUTER
         self.lateral = lateral
         self.source_db = queryset._db
+        self.source_for_write: bool = queryset._for_write
 
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
         raise TypeError(
@@ -268,10 +269,6 @@ class DerivedRelation:
         if source.combinator:
             raise NotSupportedError(
                 "Combined DerivedRelation sources are not supported."
-            )
-        if source.select_for_update:
-            raise NotSupportedError(
-                "DerivedRelation sources cannot use select_for_update()."
             )
         if source.selected is None:
             # Match Django's root-model selection, including implicit primary
@@ -538,6 +535,7 @@ class DerivedQuerySetMixin:
                         f"The relation name {name!r} conflicts with a model field."
                     )
                 value.add_to_query(clone.query, name)
+                clone._for_write = clone._for_write or value.source_for_write
             else:
                 clone = super(DerivedQuerySetMixin, clone)._annotate(
                     (), {name: value}, select
