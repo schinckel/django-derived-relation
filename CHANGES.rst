@@ -4,6 +4,10 @@ Changelog
 Unreleased
 ----------
 
+* Support ordinary and LATERAL joins on CockroachDB and YugabyteDB, and
+  ordinary joins on Firebird and TiDB with matching third-party backends.
+  Reject LATERAL joins on TiDB regardless of its MySQL compatibility version.
+
 * Support ordinary derived joins on SQLite, MySQL, MariaDB, and Oracle, and
   LATERAL joins on MySQL 8.0.14 or later and Oracle.
 * Preserve NULL results for unmatched MySQL and Oracle LEFT joins with

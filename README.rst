@@ -40,6 +40,47 @@ using the database versions supported by your Django release. LATERAL joins
 work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
 ``lateral=True`` with ``NotSupportedError``; independent sources still work.
 
+Additional backends have been tested against their published Django adapters:
+
+.. list-table:: Third-party backends
+   :header-rows: 1
+
+   * - Backend
+     - Server tested
+     - Django tested
+     - Ordinary
+     - LATERAL
+   * - CockroachDB (``django-cockroachdb``)
+     - 26.3.1
+     - 4.2, 6.1
+     - Yes
+     - Yes
+   * - YugabyteDB (``django-yugabytedb``)
+     - 2026.1.2.0
+     - 4.2
+     - Yes
+     - Yes
+   * - Firebird (``django-firebird``)
+     - 5.0.3
+     - 5.2, 6.1
+     - Yes
+     - No
+   * - TiDB (``django-tidb``)
+     - 8.5.3
+     - 4.2, 6.0
+     - Yes
+     - No
+
+Use the backend package release matching your Django version. TiDB requires
+``ENGINE = "django_tidb"`` and rejects ``lateral=True`` even when its reported
+MySQL compatibility version would allow it. Its CI tests use the TiDB SQL
+server with disposable local storage.
+
+Firebird LATERAL joins are currently disabled: a correlated LEFT join can
+return an outer column's value instead of NULL for an unmatched source.
+Firebird also rejects ``select_for_update()`` inside a derived source, as it
+does for native derived tables.
+
 Backend restrictions and Django's field conversions still apply. In particular,
 Oracle returns an empty string for a NULL projected character field and rejects
 ``select_for_update()`` inside a derived source. MySQL date literals may need

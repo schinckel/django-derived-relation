@@ -1,0 +1,106 @@
+name: Additional backends
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  backend:
+    name: ${{ matrix.backend }} / Django ${{ matrix.django }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {backend: cockroach, django: "42", flag: cockroachdb}
+          - {backend: cockroach, django: "61", flag: cockroachdb}
+          - {backend: yugabyte, django: "42", flag: yugabytedb}
+          - {backend: firebird, django: "52", flag: firebird}
+          - {backend: firebird, django: "61", flag: firebird}
+          - {backend: tidb, django: "42", flag: tidb}
+          - {backend: tidb, django: "60", flag: tidb}
+          - {backend: db2, django: "42", flag: db2}
+          - {backend: db2, django: "52", flag: db2}
+    env:
+      TOX_ENV: py312-django${{ matrix.django }}-${{ matrix.backend }}
+      PGHOST: 127.0.0.1
+      PGPORT: "26257"
+      PGUSER: root
+      PGDATABASE: defaultdb
+      FIREBIRD_HOST: 127.0.0.1
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "4000"
+      MYSQL_DATABASE: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native client libraries
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          case "$BACKEND" in
+            firebird)
+              sudo apt-get update
+              sudo apt-get install -y libfbclient2
+              ;;
+            tidb)
+              sudo apt-get update
+              sudo apt-get install -y default-libmysqlclient-dev pkg-config
+              ;;
+          esac
+      - name: Start disposable database
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          case "$BACKEND" in
+            cockroach)
+              docker run -d --name derived-db --memory 2g -p 127.0.0.1:26257:26257 \
+                cockroachdb/cockroach:v26.3.1 start-single-node --insecure \
+                --cache=128MiB --max-sql-memory=256MiB
+              ;;
+            yugabyte)
+              docker run -d --name derived-db --memory 3g -p 127.0.0.1:5433:5433 \
+                yugabytedb/yugabyte:2026.1.2.0-b137 bin/yugabyted start \
+                --background=false --ui=false \
+                --tserver_flags=memory_limit_hard_bytes=1073741824 \
+                --master_flags=memory_limit_hard_bytes=536870912
+              echo 'PGPORT=5433' >> "$GITHUB_ENV"
+              echo 'PGUSER=yugabyte' >> "$GITHUB_ENV"
+              echo 'PGDATABASE=yugabyte' >> "$GITHUB_ENV"
+              ;;
+            firebird)
+              docker run -d --name derived-db --memory 512m -p 127.0.0.1:3050:3050 \
+                -e FIREBIRD_ROOT_PASSWORD=derived-tests -e FIREBIRD_DATABASE=derived.fdb \
+                firebirdsql/firebird:5.0.3
+              ;;
+            tidb)
+              # Exercise the real TiDB SQL engine with disposable local storage.
+              docker run -d --name derived-db --memory 2g -p 127.0.0.1:4000:4000 \
+                pingcap/tidb:v8.5.3 --store=unistore --path=/tmp/derived-tidb \
+                --advertise-address=127.0.0.1
+              ;;
+            db2)
+              # Db2 needs privileges for initialization; this runner is disposable.
+              docker run -d --name derived-db --privileged --memory 4g --shm-size 1g \
+                -p 127.0.0.1:50000:50000 -e LICENSE=accept \
+                -e DB2INST1_PASSWORD=derived-tests -e DBNAME=derived \
+                icr.io/db2_community/db2:12.1.0.0
+              ;;
+          esac
+      - run: python -m pip install tox
+      - name: Install wheel and matching backend
+        run: python -m tox -e "$TOX_ENV" --notest
+      - name: Wait for native SQL execution
+        env:
+          BACKEND_FLAG: ${{ matrix.flag }}
+        run: .tox/"$TOX_ENV"/bin/python tests/wait_for_database.py "$BACKEND_FLAG"
+      - name: Test installed wheel
+        run: python -m tox -e "$TOX_ENV"
+      - name: Database logs
+        if: failure()
+        run: docker logs --tail 150 derived-db
+      - name: Remove disposable database
+        if: always()
+        run: docker rm -f derived-db

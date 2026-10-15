@@ -7,7 +7,14 @@ from unittest.mock import patch
 
 from django import VERSION
 from django.core.exceptions import FieldDoesNotExist, FieldError
-from django.db import DatabaseError, NotSupportedError, connection, models, transaction
+from django.db import (
+    DatabaseError,
+    NotSupportedError,
+    connection,
+    connections,
+    models,
+    transaction,
+)
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import (
     Count,
@@ -24,7 +31,12 @@ from django.db.models.functions import Cast
 from django.db.models.lookups import GreaterThan
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.query import Query
-from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
+from django.test import (
+    SimpleTestCase,
+    TestCase,
+    TransactionTestCase,
+    skipUnlessDBFeature,
+)
 
 import django_derived_relation
 from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
@@ -42,7 +54,16 @@ class PostgreSQLSourceQuery(Query):
         return sql, tuple(params)
 
 
-class DerivedRelationTestCase(TestCase):
+class DerivedRelationTestCase(
+    TransactionTestCase if connection.vendor == "yugabyte" else TestCase
+):
+    def setUp(self) -> None:
+        super().setUp()
+        if connection.vendor == "yugabyte":
+            # YugabyteDB's deferred FK triggers fail after TestCase savepoint
+            # rollback. Use committed fixtures and Django's normal table flush.
+            self.setUpTestData()
+
     @classmethod
     def setUpTestData(cls) -> None:
         cls.empty = Parent.objects.create(name="empty")
@@ -59,9 +80,10 @@ class DerivedRelationTestCase(TestCase):
 
 
 @skipUnless(
-    connection.vendor in {"postgresql", "oracle"}
+    connection.vendor in {"postgresql", "oracle", "cockroachdb", "yugabyte", "DB2"}
     or (
         connection.vendor == "mysql"
+        and not hasattr(type(connections["default"]), "tidb_version")
         and not connection.mysql_is_mariadb
         and connection.mysql_version >= (8, 0, 14)
     ),
@@ -333,7 +355,10 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .filter(name="many")
         )
         sql, params = joined.query.sql_with_params()
-        self.assertEqual(params, ("select", "source", 5, 15, "many"))
+        compiler = joined.query.get_compiler(connection=connection)
+        label_params = compiler.compile(Value("select"))[1]
+        mark_params = compiler.compile(Value("source"))[1]
+        self.assertEqual(params, (*label_params, *mark_params, 5, 15, "many"))
         self.assertEqual(sql.count("%s"), len(params))
         self.assertEqual(joined.count(), 2)
 
@@ -716,7 +741,17 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
 
 @skipUnless(
-    connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
+    connection.vendor
+    in {
+        "postgresql",
+        "sqlite",
+        "mysql",
+        "oracle",
+        "cockroachdb",
+        "yugabyte",
+        "firebird",
+        "DB2",
+    },
     "Requires ordinary derived joins.",
 )
 class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
@@ -863,6 +898,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         )
 
     @skipUnlessDBFeature("has_select_for_update")
+    @transaction.atomic
     def test_source_locking_uses_native_backend_compiler(self) -> None:
         source = Child.objects.values("id", "parent_id").select_for_update()
         joined = Parent.objects.alias(
@@ -871,8 +907,8 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         self.assertIn("FOR UPDATE", joined.query.sql_with_params()[0])
         self.assertTrue(joined._for_write)
         self.assertFalse(joined.query.select_for_update)
-        if connection.vendor == "oracle":
-            # Oracle permits FOR UPDATE only in a top-level SELECT. Preserve
+        if connection.vendor in {"oracle", "firebird"}:
+            # These engines permit FOR UPDATE only in a top-level SELECT. Preserve
             # its error rather than dropping the source's requested lock.
             with (
                 transaction.atomic(),
@@ -883,10 +919,16 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             with transaction.atomic(), self.assertRaises(DatabaseError) as native_error:
                 with connection.cursor() as cursor:
                     cursor.execute(f"SELECT * FROM ({source_sql})", params)
-            self.assertEqual(
-                derived_error.exception.args[0].code,
-                native_error.exception.args[0].code,
-            )
+            if connection.vendor == "oracle":
+                self.assertEqual(
+                    derived_error.exception.args[0].code,
+                    native_error.exception.args[0].code,
+                )
+            else:
+                self.assertEqual(
+                    derived_error.exception.__cause__.sqlcode,
+                    native_error.exception.__cause__.sqlcode,
+                )
         else:
             self.assertEqual(joined.count(), 4)
 
@@ -1102,8 +1144,12 @@ class DerivedRelationValidationTests(SimpleTestCase):
             with (
                 self.subTest(version=version, mariadb=mariadb),
                 patch.object(connection, "vendor", "mysql"),
-                patch.object(connection, "mysql_version", version, create=True),
-                patch.object(connection, "mysql_is_mariadb", mariadb, create=True),
+                patch.dict(
+                    connections["default"].__dict__,
+                    mysql_version=version,
+                    mysql_is_mariadb=mariadb,
+                ),
+                patch.object(django_derived_relation, "_is_tidb", return_value=False),
             ):
                 joined = Parent.objects.alias(
                     rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
@@ -1113,6 +1159,33 @@ class DerivedRelationValidationTests(SimpleTestCase):
                 else:
                     with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
                         joined.query.sql_with_params()
+
+    def test_tidb_ordinary_only_despite_mysql_version(self) -> None:
+        with (
+            patch.object(connection, "vendor", "mysql"),
+            patch.dict(connections["default"].__dict__, mysql_version=(8, 0, 14)),
+            patch.object(
+                type(connections["default"]), "tidb_version", (8, 5, 3), create=True
+            ),
+        ):
+            self.assertTrue(django_derived_relation._is_tidb(connections["default"]))
+            joined = Parent.objects.alias(
+                rows=DerivedRelation(Child.objects.values("amount"))
+            )
+            self.assertNotIn("NO_MERGE", joined.query.sql_with_params()[0])
+            lateral = Parent.objects.alias(
+                rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
+            )
+            with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
+                lateral.query.sql_with_params()
+
+    def test_firebird_rejects_lateral(self) -> None:
+        with patch.object(connection, "vendor", "firebird"):
+            joined = Parent.objects.alias(
+                rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
+            )
+            with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
+                joined.query.sql_with_params()
 
     def test_backend_can_disable_derived_joins(self) -> None:
         joined = Parent.objects.alias(rows=DerivedRelation(Child.objects.values("id")))
