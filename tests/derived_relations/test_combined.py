@@ -2,7 +2,7 @@ import pickle
 from unittest import skipUnless
 
 from django.core.exceptions import FieldError
-from django.db import DatabaseError, NotSupportedError, connection, transaction
+from django.db import DatabaseError, NotSupportedError, connection, models, transaction
 from django.db.models import F, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.test import TestCase
 
@@ -151,6 +151,9 @@ class CombinedSourceTests(TestCase):
                     with self.assertRaises(DatabaseError), transaction.atomic():
                         list(joined.values_list("rows__amount", flat=True))
 
+    @skipUnless(
+        hasattr(models, "CompositePrimaryKey"), "Requires composite primary keys."
+    )
     def test_composite_primary_key_deferred_operands_keep_components(self) -> None:
         CompositeChild.objects.create(parent=self.one, amount=40, sequence=3)
         first = CompositeChild.objects.only("amount")
@@ -178,7 +181,7 @@ class CombinedSourceTests(TestCase):
             base.values("amount").union(base.defer("amount")),
             base.only("sequence").union(base.defer("amount")).values("amount"),
         ):
-            with self.subTest(source=source.query.selected):
+            with self.subTest(source=getattr(source.query, "selected", None)):
                 joined = Parent.objects.filter(pk=self.one.pk).alias(
                     rows=DerivedRelation(source)
                 )
@@ -272,7 +275,10 @@ class CombinedSourceTests(TestCase):
                     (current_source, *current_source.combined_queries),
                     strict=True,
                 ):
-                    self.assertEqual(current.selected, original.selected)
+                    self.assertEqual(
+                        getattr(current, "selected", None),
+                        getattr(original, "selected", None),
+                    )
                     self.assertEqual(
                         tuple(current.annotations), tuple(original.annotations)
                     )
@@ -283,7 +289,10 @@ class CombinedSourceTests(TestCase):
                     (source.query, *source.query.combined_queries),
                     strict=True,
                 ):
-                    self.assertEqual(current.selected, original.selected)
+                    self.assertEqual(
+                        getattr(current, "selected", None),
+                        getattr(original, "selected", None),
+                    )
                     self.assertEqual(
                         tuple(current.annotations), tuple(original.annotations)
                     )
@@ -400,7 +409,7 @@ class CombinedSourceTests(TestCase):
         )
         source = first.union(second)
         before = tuple(
-            pickle.dumps(queryset.query) for queryset in (first, second, source)
+            queryset.query.sql_with_params() for queryset in (first, second, source)
         )
         joined = Parent.objects.filter(name="one").alias(
             rows=DerivedRelation(source, condition=Q(rows__x__gt=15))
@@ -411,7 +420,9 @@ class CombinedSourceTests(TestCase):
             [21, 31, 32],
         )
         self.assertEqual(
-            tuple(pickle.dumps(queryset.query) for queryset in (first, second, source)),
+            tuple(
+                queryset.query.sql_with_params() for queryset in (first, second, source)
+            ),
             before,
         )
         restored = Parent.objects.all()
@@ -486,7 +497,7 @@ class CombinedSourceTests(TestCase):
                 )
 
     def test_later_union_operand_nulls_survive_negation(self) -> None:
-        first = Child.objects.filter(parent=self.one).values("amount")
+        first = Child.objects.filter(parent=self.one).values(value=F("amount"))
         second = Parent.objects.filter(pk=self.empty.pk).values(
             other=Value(None, output_field=IntegerField())
         )
@@ -494,9 +505,7 @@ class CombinedSourceTests(TestCase):
             rows=DerivedRelation(first.union(second), join_type="inner")
         )
         self.assertEqual(
-            list(
-                joined.exclude(rows__amount=10).values_list("rows__amount", flat=True)
-            ),
+            list(joined.exclude(rows__value=10).values_list("rows__value", flat=True)),
             [None],
         )
 
