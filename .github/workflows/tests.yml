@@ -150,6 +150,48 @@ jobs:
           PYTHON_VERSION: ${{ matrix.python }}
           DJANGO_VERSION: ${{ matrix.django }}
         run: python -m tox -e "py${PYTHON_VERSION/./}-django${DJANGO_VERSION}-oracle"
+  sqlserver:
+    name: SQL Server / Django ${{ matrix.django }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {django: "42", python: "3.11"}
+          - {django: "61", python: "3.13"}
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: "Derived-tests-2026!"
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Derived-tests-2026!' -C -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      SQLSERVER_HOST: 127.0.0.1
+      SQLSERVER_PASSWORD: "Derived-tests-2026!"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Microsoft ODBC Driver 18
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/packages-microsoft-prod.deb" https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+          sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          sudo apt-get update
+          sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+      - run: python -m pip install tox
+      - name: Test installed wheel against SQL Server
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          DJANGO_VERSION: ${{ matrix.django }}
+        run: python -m tox -e "py${PYTHON_VERSION/./}-django${DJANGO_VERSION}-sqlserver"
   lint:
     runs-on: ubuntu-latest
     steps:

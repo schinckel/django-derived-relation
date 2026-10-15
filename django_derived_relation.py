@@ -143,7 +143,8 @@ class DerivedJoin(BaseTable):
         if not getattr(
             connection.features,
             "supports_derived_joins",
-            connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
+            connection.vendor
+            in {"postgresql", "sqlite", "mysql", "oracle", "microsoft"},
         ):
             raise NotSupportedError("This backend does not support DerivedRelation.")
         if self.lateral and not getattr(
@@ -185,6 +186,15 @@ class DerivedJoin(BaseTable):
                 pass
             except EmptyResultSet:
                 on_sql = "1=0"
+        if connection.vendor == "microsoft" and self.lateral:
+            alias = connection.ops.quote_name(self.table_alias)
+            if self.condition is not None:
+                # APPLY has no ON clause. Test the chosen source rows after
+                # their ordering/slice, inside APPLY so a LEFT join retains
+                # the outer row when the condition rejects every source row.
+                sql = f"(SELECT {alias}.* FROM {sql} {alias} WHERE {on_sql})"
+            operator = "OUTER APPLY" if self.join_type == LOUTER else "CROSS APPLY"
+            return f"{operator} {sql} {alias}", (*params, *on_params)
         lateral = " LATERAL" if self.lateral else ""
         return (
             f"{self.join_type}{lateral} {sql} "
@@ -424,7 +434,7 @@ def _supports_lateral_joins(connection: BaseDatabaseWrapper) -> bool:
             0,
             14,
         )
-    return connection.vendor in {"postgresql", "oracle"}
+    return connection.vendor in {"postgresql", "oracle", "microsoft"}
 
 
 def _restore_query(base: type[Query], state: dict[str, object]) -> Query:

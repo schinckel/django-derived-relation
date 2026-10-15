@@ -59,7 +59,7 @@ class DerivedRelationTestCase(TestCase):
 
 
 @skipUnless(
-    connection.vendor in {"postgresql", "oracle"}
+    connection.vendor in {"postgresql", "oracle", "microsoft"}
     or (
         connection.vendor == "mysql"
         and not connection.mysql_is_mariadb
@@ -68,6 +68,43 @@ class DerivedRelationTestCase(TestCase):
     "Requires LATERAL derived joins.",
 )
 class DerivedRelationTests(DerivedRelationTestCase):
+    def test_join_condition_applies_after_source_slice(self) -> None:
+        source = self.source().order_by("amount")[:1]
+        for kind, expected in (
+            ("left", [("empty", None), ("many", None), ("one", None)]),
+            ("inner", []),
+        ):
+            with self.subTest(kind=kind):
+                joined = Parent.objects.alias(
+                    rows=DerivedRelation(
+                        source,
+                        lateral=True,
+                        join_type=kind,
+                        condition=Q(rows__amount__gte=30),
+                    )
+                )
+                self.assertEqual(
+                    list(joined.order_by("name").values_list("name", "rows__amount")),
+                    expected,
+                )
+
+    def test_lateral_constant_conditions(self) -> None:
+        for condition, left_count, inner_count in (
+            (Q(rows__amount__in=[]), 3, 0),
+            (~Q(rows__amount__in=[]), 4, 3),
+        ):
+            for kind, expected in (("left", left_count), ("inner", inner_count)):
+                with self.subTest(condition=condition, kind=kind):
+                    joined = Parent.objects.alias(
+                        rows=DerivedRelation(
+                            self.source(),
+                            lateral=True,
+                            join_type=kind,
+                            condition=condition,
+                        )
+                    )
+                    self.assertEqual(joined.count(), expected)
+
     def test_computed_nullable_projection_in_inner_join(self) -> None:
         source = (
             Child.objects.filter(parent_id=OuterRef("pk"))
@@ -716,7 +753,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
 
 @skipUnless(
-    connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
+    connection.vendor in {"postgresql", "sqlite", "mysql", "oracle", "microsoft"},
     "Requires ordinary derived joins.",
 )
 class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
@@ -868,7 +905,8 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         joined = Parent.objects.alias(
             rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
         )
-        self.assertIn("FOR UPDATE", joined.query.sql_with_params()[0])
+        lock_clause = "UPDLOCK" if connection.vendor == "microsoft" else "FOR UPDATE"
+        self.assertIn(lock_clause, joined.query.sql_with_params()[0])
         self.assertTrue(joined._for_write)
         self.assertFalse(joined.query.select_for_update)
         if connection.vendor == "oracle":
@@ -1093,6 +1131,29 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_sql_server_apply_rendering(self) -> None:
+        source = Child.objects.filter(parent_id=OuterRef("pk"), amount__gte=10).values(
+            "amount"
+        )[:1]
+        for kind, operator in (("left", "OUTER APPLY"), ("inner", "CROSS APPLY")):
+            with (
+                self.subTest(kind=kind),
+                patch.object(connection, "vendor", "microsoft"),
+            ):
+                joined = Parent.objects.alias(
+                    rows=DerivedRelation(
+                        source,
+                        lateral=True,
+                        join_type=kind,
+                        condition=Q(rows__amount__gte=30),
+                    )
+                )
+                sql, params = joined.query.sql_with_params()
+                self.assertIn(f"{operator} (SELECT", sql)
+                self.assertNotIn(" LATERAL ", sql)
+                self.assertNotIn(" ON (", sql)
+                self.assertEqual(params, (10, 30))
+
     def test_mysql_lateral_version_boundary(self) -> None:
         for version, mariadb, supported in (
             ((8, 0, 13), False, False),

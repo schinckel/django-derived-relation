@@ -11,7 +11,7 @@ from django.test.runner import DiscoverRunner
 def main() -> int:
     parser = argparse.ArgumentParser()
     backends = parser.add_mutually_exclusive_group()
-    for backend in ("sqlite", "mysql", "oracle"):
+    for backend in ("sqlite", "mysql", "oracle", "sqlserver"):
         backends.add_argument(
             f"--{backend}", dest="backend", action="store_const", const=backend
         )
@@ -27,6 +27,22 @@ def main() -> int:
             "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
             "HOST": os.environ.get("MYSQL_HOST", "localhost"),
             "PORT": os.environ.get("MYSQL_PORT", "3306"),
+            "TEST": {"NAME": "test_django_derived_relation"},
+        }
+    elif backend == "sqlserver":
+        database = {
+            "ENGINE": "mssql",
+            "NAME": os.environ.get("SQLSERVER_DATABASE", "master"),
+            "USER": os.environ.get("SQLSERVER_USER", "sa"),
+            "PASSWORD": os.environ.get("SQLSERVER_PASSWORD", ""),
+            "HOST": os.environ.get("SQLSERVER_HOST", "localhost"),
+            "PORT": os.environ.get("SQLSERVER_PORT", "1433"),
+            "OPTIONS": {
+                "driver": os.environ.get(
+                    "SQLSERVER_DRIVER", "ODBC Driver 18 for SQL Server"
+                ),
+                "extra_params": "TrustServerCertificate=yes",
+            },
             "TEST": {"NAME": "test_django_derived_relation"},
         }
     elif backend == "oracle":
