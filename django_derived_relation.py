@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
-from django.db.models import Model, QuerySet
-from django.db.models.expressions import Col, ColPairs, RawSQL
+from django.db.models import Model, QuerySet, expressions
+from django.db.models.expressions import Col, RawSQL
 from django.db.models.query_utils import Q, refs_expression
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import INNER, LOUTER
@@ -31,6 +31,11 @@ if TYPE_CHECKING:
     from django.db.models.fields import Field
     from django.db.models.lookups import Lookup
     from django.db.models.sql.where import WhereNode
+
+
+_composite_col_types: tuple[type[BaseExpression], ...] = (
+    (expressions.ColPairs,) if hasattr(expressions, "ColPairs") else ()
+)
 
 
 class DerivedCol(Col):
@@ -262,6 +267,10 @@ class DerivedRelation:
             self.query
         )
 
+    @property
+    def default_alias(self) -> str:
+        raise TypeError("DerivedRelation requires an explicit alias.")
+
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
         raise TypeError(
             "DerivedRelation must be registered with alias() or annotate(); "
@@ -270,7 +279,8 @@ class DerivedRelation:
 
     def _projection(self, source: Query) -> dict[str, BaseExpression]:
         projection: dict[str, BaseExpression] = {}
-        if source.selected is None:
+        selection = getattr(source, "selected", None)
+        if selection is None:
             # get_default_columns() uses model/query metadata, without rendering
             # SQL or choosing a database. Keep Django's deferred mask intact.
             cols = (
@@ -285,7 +295,11 @@ class DerivedRelation:
                     (column, RawSQL(*args))
                     for column, args in source.extra_select.items()
                 ),
-                *((col.target.attname, col) for col in cols),
+                *zip(
+                    source.values_select or tuple(col.target.attname for col in cols),
+                    cols,
+                    strict=True,
+                ),
                 *source.annotation_select.items(),
             ]
             projection = dict(selected)
@@ -295,7 +309,7 @@ class DerivedRelation:
                     "Use an explicit values() projection."
                 )
         else:
-            for column, expression in source.selected.items():
+            for column, expression in selection.items():
                 if isinstance(expression, int):
                     expression = source.select[expression]
                 elif isinstance(expression, str):
@@ -362,9 +376,7 @@ class DerivedRelation:
         query.alias_map[alias] = join
         query.derived_relations = query.derived_relations | {name}
         if self.condition is not None:
-            join.condition = query.build_filter(
-                self.condition, split_subq=False, update_join_types=False
-            )[0]
+            join.condition = _resolve_join_condition(query, self.condition)
         # ON needs this source's namespace during resolution, but any ordinary
         # relationship dependencies it introduces must precede the source.
         query.alias_map[alias] = query.alias_map.pop(alias)
@@ -372,7 +384,7 @@ class DerivedRelation:
     def _columns(self, source: Query, alias: str, name: str) -> dict[str, DerivedCol]:
         columns: dict[str, DerivedCol] = {}
         for column, expression in self._projection(source).items():
-            if isinstance(expression, ColPairs):
+            if isinstance(expression, _composite_col_types):
                 raise ValueError("DerivedRelation requires individually named columns.")
             field = copy(expression.output_field)
             field.null = (
@@ -406,6 +418,13 @@ def _restore_query(base: type[Query], state: dict[str, object]) -> Query:
     return query
 
 
+def _resolve_join_condition(query: Query, condition: Q | BaseExpression) -> WhereNode:
+    if hasattr(query, "build_filtered_relation_q"):
+        # Django 4.2 has a separate ON-clause builder that avoids join promotion.
+        return query.build_filtered_relation_q(Q(condition), reuse=set())
+    return query.build_filter(condition, split_subq=False, update_join_types=False)[0]
+
+
 def _has_source_locks(query: Query) -> bool:
     """Find locks whose write-routing flag a compound queryset can lose."""
     return (
@@ -431,7 +450,7 @@ def _prepare_source_query(query: Query) -> None:
         query.table_map = {
             table: aliases[:] for table, aliases in query.table_map.items()
         }
-        if query.selected is not None:
+        if getattr(query, "selected", None) is not None:
             query.selected = query.selected.copy()
         query.__class__ = _query_class(type(query))
     for branch in query.combined_queries:
@@ -472,7 +491,7 @@ class DerivedQueryMixin:
         clone = super().clone()
         # Compilation can add compound-ordering columns to selected and joins
         # to table_map. Keep those changes on the compiler's private clone.
-        if clone.selected is not None:
+        if getattr(clone, "selected", None) is not None:
             clone.selected = clone.selected.copy()
         clone.table_map = {
             table: aliases[:] for table, aliases in clone.table_map.items()

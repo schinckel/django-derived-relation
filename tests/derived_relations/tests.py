@@ -5,6 +5,7 @@ from decimal import Decimal
 from unittest import skipUnless
 from unittest.mock import patch
 
+from django import VERSION
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import NotSupportedError, connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -301,6 +302,16 @@ class DerivedRelationTests(TestCase):
         for source, names in cases:
             with self.subTest(deferred_loading=source.query.deferred_loading):
                 source = source.filter(parent=self.one)
+                if VERSION[:3] == (4, 2, 0) and source.query.deferred_loading == (
+                    frozenset({"parent_id"}),
+                    True,
+                ):
+                    # Django #34458: deferring an FK attname crashes in 4.2.0.
+                    with self.assertRaises(AttributeError):
+                        source.query.get_compiler(connection=connection).get_select()
+                    with self.assertRaises(AttributeError):
+                        Parent.objects.alias(rows=DerivedRelation(source))
+                    continue
                 native_select = source.query.get_compiler(
                     connection=connection
                 ).get_select()[0]
@@ -354,7 +365,7 @@ class DerivedRelationTests(TestCase):
             [60],
         )
         self.assertEqual(source.query.deferred_loading, (frozenset({"amount"}), False))
-        self.assertIsNone(source.query.selected)
+        self.assertIsNone(getattr(source.query, "selected", None))
         self.assertIsNone(source._result_cache)
         with self.assertRaises(FieldError):
             restored.values("rows__sequence")
@@ -408,6 +419,9 @@ class DerivedRelationTests(TestCase):
         with self.assertRaises(FieldError):
             joined.values("rows__sequence")
 
+    @skipUnless(
+        hasattr(models, "CompositePrimaryKey"), "Requires composite primary keys."
+    )
     def test_composite_primary_key_deferred_source_has_individual_columns(self) -> None:
         CompositeChild.objects.create(parent=self.one, amount=40, sequence=3)
         source = CompositeChild.objects.only("amount").filter(parent=self.one)
@@ -884,14 +898,20 @@ class DerivedRelationValidationTests(SimpleTestCase):
             bare.union(bare.union(bare)),
             Child.objects.values("amount").union(bare),
         ):
-            with self.subTest(selected=source.query.selected):
+            with self.subTest(selected=getattr(source.query, "selected", None)):
                 joined = Parent.objects.alias(rows=DerivedRelation(source))
                 pairs: list[tuple[Query, Query]] = [
                     (source.query, joined.query.alias_map["rows"].source)
                 ]
                 while pairs:
                     original, prepared = pairs.pop()
-                    self.assertEqual(prepared.selected, original.selected)
+                    self.assertEqual(
+                        getattr(prepared, "selected", None),
+                        getattr(original, "selected", None),
+                    )
+                    self.assertEqual(
+                        prepared.has_select_fields, original.has_select_fields
+                    )
                     self.assertEqual(prepared.default_cols, original.default_cols)
                     self.assertEqual(
                         prepared.deferred_loading, original.deferred_loading
