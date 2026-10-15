@@ -35,10 +35,18 @@ supported with Django 4.2 through 5.2.
 Database support
 ================
 
-Ordinary derived joins work on PostgreSQL, SQLite, MySQL, MariaDB, and Oracle,
-using the database versions supported by your Django release. LATERAL joins
-work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
-``lateral=True`` with ``NotSupportedError``; independent sources still work.
+Ordinary derived joins work on PostgreSQL, SQLite, MySQL, MariaDB, Oracle, and
+SQL Server, using the database versions supported by your Django release and
+backend. LATERAL joins work on PostgreSQL, Oracle, MySQL 8.0.14 or later, and
+SQL Server. SQLite and MariaDB reject ``lateral=True`` with
+``NotSupportedError``; independent sources still work.
+
+SQL Server uses Microsoft's ``mssql-django`` backend. ``lateral=True`` compiles
+to ``OUTER APPLY`` for left joins and ``CROSS APPLY`` for inner joins. An ON
+condition filters a wrapper around the source, after its ordering and slice,
+so a rejected match still preserves the outer row for a left join. Use
+``mssql-django`` 1.8 on Django 4.2–5.1, or 2.x on Django 5.2 and later.
+SQL Server's native restrictions and the backend's field conversions apply.
 
 Backend restrictions and Django's field conversions still apply. In particular,
 Oracle returns an empty string for a NULL projected character field and rejects
@@ -449,6 +457,8 @@ the outer queryset is a separate operation, subject to Django's and
 the database's normal restrictions on locking joined tables. Oracle permits
 ``FOR UPDATE`` only in a top-level SELECT, so locking derived sources raise
 its native database error. SQLite has no row-locking support.
+SQL Server's backend implements source locks using table hints such as
+``UPDLOCK`` rather than a ``FOR UPDATE`` clause.
 
 A locking source routes the outer queryset through Django's write router,
 including when the lock is inside a nested derived source. Explicit outer
@@ -560,6 +570,13 @@ requires ``cx_Oracle`` and Oracle Client libraries. The runner creates and drops
 an isolated test user in the existing USERS and TEMP tablespaces; its database
 user needs permission to do that.
 
+Use ``python tests/runtests.py --sqlserver`` with ``SQLSERVER_DATABASE``
+(default ``master``), ``SQLSERVER_USER``, ``SQLSERVER_PASSWORD``,
+``SQLSERVER_HOST``, and ``SQLSERVER_PORT``. Install ``mssql-django``, ``pyodbc``,
+and Microsoft ODBC Driver 18 first; ``SQLSERVER_DRIVER`` can select another
+installed ODBC driver. The user must be able to create and drop the isolated
+test database. The runner trusts the test server's certificate.
+
 The regression tests cover ordinary and LATERAL joins, typed and deferred projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 Independent PostgreSQL connections verify source lock contention, lock options,
@@ -573,13 +590,16 @@ Additional service-container jobs run MySQL 8.4, MariaDB 11.4, and Oracle on
 Django 4.2 and 6.1. Oracle 4.2 uses XE 21 and ``cx_Oracle``; Oracle 6.1 uses
 Free and ``oracledb``. Unsupported LATERAL tests are skipped on SQLite and
 MariaDB, while their ordinary joins execute against the real backend.
+SQL Server 2022 service jobs run both ordinary and APPLY joins on Django 4.2
+and 6.1, using the compatible 1.8 and 2.x backend versions respectively.
 
 Run the matrix locally with ``python -m pip install tox`` followed by
 ``tox``. All listed Python interpreters must be installed. To run one
 combination, use ``tox -e py311-django42``. PostgreSQL connection settings are
 passed through from the ``PG*`` environment variables. Tox runs environments
 sequentially; avoid ``tox -p`` because the runner uses a shared test database.
-For another backend, append ``-mysql`` or ``-oracle`` to the environment name,
+For another backend, append ``-mysql``, ``-oracle``, or ``-sqlserver`` to the
+environment name,
 for example ``tox -e py311-django42-mysql``. Their connection variables and
 ``LD_LIBRARY_PATH`` are passed through too.
 Support is intended to continue from Django 4.2 until the feature reaches core;
