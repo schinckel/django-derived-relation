@@ -95,6 +95,10 @@ jobs:
         run: |
           # The image briefly accepts connections before restarting its instance.
           for ((attempt=0; attempt<120; attempt++)); do
+            if [ "$(docker inspect --format '{{.State.Running}}' derived-db)" != true ]; then
+              docker logs derived-db
+              exit 1
+            fi
             if docker logs derived-db 2>&1 | grep -q 'Setup has completed'; then
               exit 0
             fi
