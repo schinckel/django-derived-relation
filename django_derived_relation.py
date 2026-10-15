@@ -158,6 +158,11 @@ class DerivedJoin(BaseTable):
             raise NotSupportedError("This backend does not support DerivedRelation.")
         if self.lateral and not _supports_lateral_joins(connection):
             raise NotSupportedError("This backend does not support LATERAL joins.")
+        if connection.vendor == "DB2" and self.source.select_for_update:
+            # ibm-db-django moves every locking clause to the outermost SELECT.
+            raise NotSupportedError(
+                "The Db2 backend cannot preserve source-only row locks."
+            )
         source = self.source.clone()
         try:
             sql, params = compiler.compile(source)

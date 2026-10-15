@@ -667,11 +667,13 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
         outer = Parent.objects.all()
         outer_alias = outer.query.get_initial_alias()
-        # Django emits custom query aliases unquoted. Oracle requires an
+        # Django emits custom query aliases unquoted. Oracle and Db2 require an
         # alphabetic first character; MySQL still exercises the former
         # wrapper alias that could shadow a correlated outer table.
         renamed = (
-            "DERIVED_SOURCE" if connection.vendor == "oracle" else "__derived_source"
+            "DERIVED_SOURCE"
+            if connection.vendor in {"oracle", "DB2"}
+            else "__derived_source"
         )
         outer.query.change_aliases({outer_alias: renamed})
         joined = outer.alias(rows=DerivedRelation(source, lateral=True))
@@ -904,9 +906,15 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         joined = Parent.objects.alias(
             rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
         )
-        self.assertIn("FOR UPDATE", joined.query.sql_with_params()[0])
         self.assertTrue(joined._for_write)
         self.assertFalse(joined.query.select_for_update)
+        if connection.vendor == "DB2":
+            with self.assertRaisesMessage(NotSupportedError, "source-only row locks"):
+                joined.count()
+            return
+        self.assertIn(
+            connection.ops.for_update_sql(), joined.query.sql_with_params()[0]
+        )
         if connection.vendor in {"oracle", "firebird"}:
             # These engines permit FOR UPDATE only in a top-level SELECT. Preserve
             # its error rather than dropping the source's requested lock.
@@ -1185,6 +1193,13 @@ class DerivedRelationValidationTests(SimpleTestCase):
                 rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
             )
             with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
+                joined.query.sql_with_params()
+
+    def test_db2_rejects_source_locks_before_backend_relocates_them(self) -> None:
+        source = Child.objects.select_for_update().values("id")
+        joined = Parent.objects.alias(rows=DerivedRelation(source))
+        with patch.object(connection, "vendor", "DB2"):
+            with self.assertRaisesMessage(NotSupportedError, "source-only row locks"):
                 joined.query.sql_with_params()
 
     def test_backend_can_disable_derived_joins(self) -> None:

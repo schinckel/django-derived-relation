@@ -64,3 +64,30 @@ release-tool tests, packaging validation and workflow validation. Review changed
 functions' annotations and complexity; report absent automated analyzers.
 Commit with normal hooks, open a separate PR against main, and inspect real CI
 results. Do not merge, tag or publish the pending release in this task.
+
+### Execution findings
+
+* CockroachDB 26.3.1 passes ordinary and lateral joins with published adapters
+  4.2 and 6.1 on Django 4.2.30 and 6.1.2.
+* YugabyteDB 2026.1.2.0 passes both join types with django-yugabytedb 4.2.0.1
+  on Django 4.2.30. Its native deferred-FK check fails after TestCase savepoint
+  rollback, reproduced with plain Django QuerySet and no derived joins. Tests
+  use TransactionTestCase with committed fixtures and ordinary Django flushes.
+* Firebird 5.0.3 passes ordinary joins with django-firebird 5.0.4/5.1.1 on
+  Django 5.2.18/6.1.2. Its lateral LEFT join lifts projected outer references
+  above NULL extension, including with an OFFSET 0 wrapper. Lateral joins stay
+  disabled. Native SQL also rejects FOR UPDATE inside derived tables.
+* TiDB 8.5.3 passes ordinary joins with django-tidb 4.2.6/6.0.1 on Django
+  4.2.30/6.0.9. Tests execute its real SQL server using the unistore local test
+  store. The native tidb_version descriptor identifies the backend without a
+  connection query; MySQL's lateral/version and NO_MERGE paths are excluded.
+* Db2 12.1.0.0 accepts native queries using ibm-db-django 1.5.3.0/1.6.0.0.
+  The Django 4.2 adapter omits run_syncdb during test creation and uses an
+  invalid remote attachment during teardown; that combination stays unverified.
+  The Django 5.2 adapter needs its undeclared Jinja2 import installed. Its
+  compiler moves all locking clauses to the outermost SELECT, so source locks
+  must be rejected rather than silently broadening their scope. The remaining
+  suite requires real execution after these compatibility adjustments.
+
+No type checker or cognitive-complexity analyzer is configured. Changed
+functions were reviewed manually for annotations and control flow.

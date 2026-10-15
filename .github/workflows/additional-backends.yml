@@ -19,7 +19,6 @@ jobs:
           - {backend: firebird, django: "61", flag: firebird}
           - {backend: tidb, django: "42", flag: tidb}
           - {backend: tidb, django: "60", flag: tidb}
-          - {backend: db2, django: "42", flag: db2}
           - {backend: db2, django: "52", flag: db2}
     env:
       TOX_ENV: py312-django${{ matrix.django }}-${{ matrix.backend }}
