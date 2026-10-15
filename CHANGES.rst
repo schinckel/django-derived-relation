@@ -4,6 +4,9 @@ Changelog
 Unreleased
 ----------
 
+0.2.0 (2026-10-15)
+------------------
+
 * Support Django 4.2 onward, including Python 3.11 with Django 4.2–5.2.
 
 * Allow ``select_for_update()`` on ordinary and LATERAL sources, preserving
