@@ -4,6 +4,15 @@ Changelog
 Unreleased
 ----------
 
+* Verify PostGIS ordinary and LATERAL joins, including spatial lookups,
+  geometry projections, and distance/area conversions, on Django 4.2 and 6.1.
+
+* Support ordinary and LATERAL joins on CockroachDB, YugabyteDB, and Db2, and
+  ordinary joins on Firebird and TiDB with matching third-party backends.
+  Support inner LATERAL joins on TiDB 8.5.7+, using its own server version;
+  reject LEFT LATERAL joins.
+  Reject Db2 source locks that its backend would apply to the outer query.
+
 * Support ordinary derived joins on SQLite, MySQL, MariaDB, and Oracle, and
   LATERAL joins on MySQL 8.0.14 or later and Oracle.
 * Preserve NULL results for unmatched MySQL and Oracle LEFT joins with

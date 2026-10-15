@@ -40,6 +40,66 @@ using the database versions supported by your Django release. LATERAL joins
 work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
 ``lateral=True`` with ``NotSupportedError``; independent sources still work.
 
+PostGIS uses the PostgreSQL join paths. Both ordinary and LATERAL joins have
+been tested on PostgreSQL 17.5 with PostGIS 3.5.2, using Django 4.2 and 6.1.
+These tests cover spatial ON conditions, correlated nearest-neighbour queries,
+geometry projections and transforms, and distance/area field conversions.
+
+Additional backends have been tested against their published Django adapters:
+
+.. list-table:: Third-party backends
+   :header-rows: 1
+
+   * - Backend
+     - Server tested
+     - Django tested
+     - Ordinary
+     - LATERAL
+   * - CockroachDB (``django-cockroachdb``)
+     - 26.3.1
+     - 4.2, 6.1
+     - Yes
+     - Yes
+   * - YugabyteDB (``django-yugabytedb``)
+     - 2026.1.2.0
+     - 4.2
+     - Yes
+     - Yes
+   * - Firebird (``django-firebird``)
+     - 5.0.3
+     - 5.2, 6.1
+     - Yes
+     - No
+   * - TiDB (``django-tidb``)
+     - 8.5.6, 8.5.7, 8.5.8
+     - 4.2, 6.0
+     - Yes
+     - Inner joins on 8.5.7+
+   * - Db2 (``ibm-db-django``)
+     - 12.1.0.0
+     - 5.2
+     - Yes
+     - Yes
+
+Use the backend package release matching your Django version. TiDB requires
+``ENGINE = "django_tidb"``. From TiDB 8.5.7, correlated sources can use
+``lateral=True, join_type="inner"``. LEFT LATERAL joins remain unsupported;
+the default ``join_type="left"`` raises ``NotSupportedError``. Capability
+checks use the TiDB server version, independently of its reported MySQL
+compatibility version. CI tests use the TiDB SQL server with disposable
+local storage.
+
+Firebird LATERAL joins are currently disabled: a correlated LEFT join can
+return an outer column's value instead of NULL for an unmatched source.
+Firebird also rejects ``select_for_update()`` inside a derived source, as it
+does for native derived tables.
+
+Db2's Django 5.2 backend (``ibm-db-django==1.6.0.0``) also needs Jinja2
+installed. Its compiler moves source locking clauses onto the outer query,
+so this adapter rejects Db2 sources using ``select_for_update()`` with
+``NotSupportedError``. The Django 4.2 Db2 backend remains unverified after
+failures in its native test database setup and teardown.
+
 Backend restrictions and Django's field conversions still apply. In particular,
 Oracle returns an empty string for a NULL projected character field and rejects
 ``select_for_update()`` inside a derived source. MySQL date literals may need
@@ -547,6 +607,12 @@ settings use the standard ``PGDATABASE``, ``PGUSER``, ``PGPASSWORD``, ``PGHOST``
 and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. Run ordinary joins on SQLite with
 ``python tests/runtests.py --sqlite``.
+
+For PostGIS, use ``python tests/runtests.py --postgis`` with the same ``PG*``
+settings, or ``tox -e py312-django61-postgis``. Install GeoDjango's GEOS and
+GDAL libraries first. The database user must also be able to create the
+PostGIS extension in the test database. CI runs this suite on Django 4.2
+and 6.1.
 
 Use ``python tests/runtests.py --mysql`` for MySQL or MariaDB, with
 ``MYSQL_DATABASE``, ``MYSQL_USER``, ``MYSQL_PASSWORD``, ``MYSQL_HOST``, and

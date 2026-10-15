@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
 jobs:
+  additional-backends:
+    uses: ./.github/workflows/additional-backends.yml
   tests:
     runs-on: ubuntu-latest
     strategy:

@@ -1,12 +1,13 @@
 """Exercise source-row locks using independent PostgreSQL connections."""
 
+from __future__ import annotations
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal
 from unittest import skipUnless
 from unittest.mock import patch
 
-import psycopg
 from django.core.exceptions import FieldError
 from django.db import NotSupportedError, OperationalError, connection, transaction
 from django.db.models import Count, F, Model, OuterRef, Q, QuerySet
@@ -17,11 +18,14 @@ from django.test import (
     override_settings,
     skipUnlessDBFeature,
 )
-from psycopg import sql
 
 from django_derived_relation import DerivedRelation
 
 from .models import Child, Parent
+
+if connection.vendor == "postgresql":
+    import psycopg
+    from psycopg import sql
 
 
 class LockRoutingRouter:

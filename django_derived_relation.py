@@ -143,15 +143,26 @@ class DerivedJoin(BaseTable):
         if not getattr(
             connection.features,
             "supports_derived_joins",
-            connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
+            connection.vendor
+            in {
+                "postgresql",
+                "sqlite",
+                "mysql",
+                "oracle",
+                "cockroachdb",
+                "yugabyte",
+                "firebird",
+                "DB2",
+            },
         ):
             raise NotSupportedError("This backend does not support DerivedRelation.")
-        if self.lateral and not getattr(
-            connection.features,
-            "supports_lateral_joins",
-            _supports_lateral_joins(connection),
-        ):
+        if self.lateral and not _supports_lateral_joins(connection, self.join_type):
             raise NotSupportedError("This backend does not support LATERAL joins.")
+        if connection.vendor == "DB2" and self.source.select_for_update:
+            # ibm-db-django moves every locking clause to the outermost SELECT.
+            raise NotSupportedError(
+                "The Db2 backend cannot preserve source-only row locks."
+            )
         source = self.source.clone()
         try:
             sql, params = compiler.compile(source)
@@ -171,7 +182,11 @@ class DerivedJoin(BaseTable):
             # View merging can lift constants above an outer join and turn
             # unmatched NULL projections into their non-NULL source values.
             sql = f"(SELECT /*+ NO_MERGE */ * FROM {sql})"
-        elif connection.vendor == "mysql" and not connection.mysql_is_mariadb:
+        elif (
+            connection.vendor == "mysql"
+            and not _is_tidb(connection)
+            and not connection.mysql_is_mariadb
+        ):
             # MySQL can also lift constant expressions across LEFT joins.
             # Target the wrapper's local alias without introducing a name
             # that could shadow a correlated outer table.
@@ -417,14 +432,29 @@ def _query_class(base: type[Query]) -> type[Query]:
     return type("DerivedQuery", (DerivedQueryMixin, base), {"_derived_base": base})
 
 
-def _supports_lateral_joins(connection: BaseDatabaseWrapper) -> bool:
+def _is_tidb(connection: BaseDatabaseWrapper) -> bool:
+    # TiDB reports vendor='mysql', but needs its own capability and optimizer
+    # handling. Inspect its native wrapper property without querying it.
+    return hasattr(type(connection), "tidb_version")
+
+
+def _supports_lateral_joins(connection: BaseDatabaseWrapper, join_type: str) -> bool:
+    supported = getattr(connection.features, "supports_lateral_joins", None)
+    if supported is not None:
+        return bool(supported)
     if connection.vendor == "mysql":
-        return not connection.mysql_is_mariadb and connection.mysql_version >= (
-            8,
-            0,
-            14,
-        )
-    return connection.vendor in {"postgresql", "oracle"}
+        if _is_tidb(connection):
+            return join_type == INNER and connection.tidb_version >= (8, 5, 7)
+        if connection.mysql_is_mariadb:
+            return False
+        return connection.mysql_version >= (8, 0, 14)
+    return connection.vendor in {
+        "postgresql",
+        "oracle",
+        "cockroachdb",
+        "yugabyte",
+        "DB2",
+    }
 
 
 def _restore_query(base: type[Query], state: dict[str, object]) -> Query:
