@@ -642,7 +642,13 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
         outer = Parent.objects.all()
         outer_alias = outer.query.get_initial_alias()
-        outer.query.change_aliases({outer_alias: "__derived_source"})
+        # Django emits custom query aliases unquoted. Oracle requires an
+        # alphabetic first character; MySQL still exercises the former
+        # wrapper alias that could shadow a correlated outer table.
+        renamed = (
+            "DERIVED_SOURCE" if connection.vendor == "oracle" else "__derived_source"
+        )
+        outer.query.change_aliases({outer_alias: renamed})
         joined = outer.alias(rows=DerivedRelation(source, lateral=True))
         self.assertEqual(joined.filter(rows__marker__year=2026).count(), 3)
         self.assertEqual(
