@@ -137,9 +137,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libaio1 libnsl2
           oracle_home=$(docker exec "$ORACLE_CONTAINER" printenv ORACLE_HOME)
-          mkdir -p "$RUNNER_TEMP/oracle-client"
-          docker cp "$ORACLE_CONTAINER:$oracle_home/lib/." "$RUNNER_TEMP/oracle-client/"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/oracle-client" >> "$GITHUB_ENV"
+          # Database-home libraries also need their timezone and NLS data.
+          for directory in lib oracore/zoneinfo nls/data rdbms/mesg; do
+            mkdir -p "$RUNNER_TEMP/oracle-client/$directory"
+            docker cp "$ORACLE_CONTAINER:$oracle_home/$directory/." "$RUNNER_TEMP/oracle-client/$directory/"
+          done
+          echo "ORACLE_HOME=$RUNNER_TEMP/oracle-client" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/oracle-client/lib" >> "$GITHUB_ENV"
       - run: python -m pip install tox
       - name: Test installed wheel against Oracle
         env:
