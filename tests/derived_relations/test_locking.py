@@ -202,7 +202,7 @@ class DerivedRelationLockingTests(TransactionTestCase):
     def test_deferred_source_preserves_projection_and_locks(self) -> None:
         for source in (
             self._source(True).only("amount"),
-            self._source(True).defer("parent_id", "sequence"),
+            self._source(True).defer("parent", "sequence"),
         ):
             with (
                 self.subTest(deferred=source.query.deferred_loading),
