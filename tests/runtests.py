@@ -1,7 +1,7 @@
 """Run the standalone behavioral suite without a Django source checkout."""
 
+import argparse
 import os
-import sys
 
 import django
 from django.conf import settings
@@ -9,11 +9,42 @@ from django.test.runner import DiscoverRunner
 
 
 def main() -> int:
-    sqlite = "--sqlite" in sys.argv
-    database = (
-        {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
-        if sqlite
-        else {
+    parser = argparse.ArgumentParser()
+    backends = parser.add_mutually_exclusive_group()
+    for backend in ("sqlite", "mysql", "oracle"):
+        backends.add_argument(
+            f"--{backend}", dest="backend", action="store_const", const=backend
+        )
+    parser.set_defaults(backend="postgresql")
+    backend = parser.parse_args().backend
+    if backend == "sqlite":
+        database = {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
+    elif backend == "mysql":
+        database = {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": os.environ.get("MYSQL_DATABASE", "django_derived_relation"),
+            "USER": os.environ.get("MYSQL_USER", "root"),
+            "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
+            "HOST": os.environ.get("MYSQL_HOST", "localhost"),
+            "PORT": os.environ.get("MYSQL_PORT", "3306"),
+            "TEST": {"NAME": "test_django_derived_relation"},
+        }
+    elif backend == "oracle":
+        database = {
+            "ENGINE": "django.db.backends.oracle",
+            "NAME": os.environ.get("ORACLE_NAME", "localhost:1521/FREEPDB1"),
+            "USER": os.environ.get("ORACLE_USER", "system"),
+            "PASSWORD": os.environ.get("ORACLE_PASSWORD", ""),
+            "TEST": {
+                "CREATE_DB": False,
+                "USER": "test_django_derived_relation",
+                "PASSWORD": "derived-tests",
+                "TBLSPACE": "USERS",
+                "TBLSPACE_TMP": "TEMP",
+            },
+        }
+    else:
+        database = {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": os.environ.get("PGDATABASE", "postgres"),
             "USER": os.environ.get("PGUSER", ""),
@@ -22,7 +53,6 @@ def main() -> int:
             "PORT": os.environ.get("PGPORT", ""),
             "TEST": {"NAME": "test_django_derived_relation"},
         }
-    )
     settings.configure(
         DATABASES={"default": database},
         INSTALLED_APPS=["derived_relations"],

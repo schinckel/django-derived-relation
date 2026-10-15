@@ -143,13 +143,13 @@ class DerivedJoin(BaseTable):
         if not getattr(
             connection.features,
             "supports_derived_joins",
-            connection.vendor == "postgresql",
+            connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
         ):
             raise NotSupportedError("This backend does not support DerivedRelation.")
         if self.lateral and not getattr(
             connection.features,
             "supports_lateral_joins",
-            connection.vendor == "postgresql",
+            _supports_lateral_joins(connection),
         ):
             raise NotSupportedError("This backend does not support LATERAL joins.")
         source = self.source.clone()
@@ -165,16 +165,26 @@ class DerivedJoin(BaseTable):
             # Preserve the source's EmptyResultSet contract for every shape.
             sql = (
                 f"(SELECT * FROM ({sql}) "
-                f"{compiler.connection.ops.quote_name('__derived_empty')} WHERE FALSE)"
+                f"{compiler.connection.ops.quote_name('__derived_empty')} WHERE 1=0)"
             )
-        on_sql, on_params = "TRUE", ()
+        if connection.vendor == "oracle":
+            # View merging can lift constants above an outer join and turn
+            # unmatched NULL projections into their non-NULL source values.
+            sql = f"(SELECT /*+ NO_MERGE */ * FROM {sql})"
+        elif connection.vendor == "mysql" and not connection.mysql_is_mariadb:
+            # MySQL can also lift constant expressions across LEFT joins.
+            # Target the wrapper's local alias without introducing a name
+            # that could shadow a correlated outer table.
+            alias = connection.ops.quote_name(self.table_alias)
+            sql = f"(SELECT /*+ NO_MERGE({alias}) */ * FROM {sql} {alias})"
+        on_sql, on_params = "1=1", ()
         if self.condition is not None:
             try:
                 on_sql, on_params = compiler.compile(self.condition)
             except FullResultSet:
                 pass
             except EmptyResultSet:
-                on_sql = "FALSE"
+                on_sql = "1=0"
         lateral = " LATERAL" if self.lateral else ""
         return (
             f"{self.join_type}{lateral} {sql} "
@@ -405,6 +415,16 @@ def _query_class(base: type[Query]) -> type[Query]:
     if issubclass(base, DerivedQueryMixin):
         return base
     return type("DerivedQuery", (DerivedQueryMixin, base), {"_derived_base": base})
+
+
+def _supports_lateral_joins(connection: BaseDatabaseWrapper) -> bool:
+    if connection.vendor == "mysql":
+        return not connection.mysql_is_mariadb and connection.mysql_version >= (
+            8,
+            0,
+            14,
+        )
+    return connection.vendor in {"postgresql", "oracle"}
 
 
 def _restore_query(base: type[Query], state: dict[str, object]) -> Query:

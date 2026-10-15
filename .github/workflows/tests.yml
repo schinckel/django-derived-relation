@@ -54,6 +54,102 @@ jobs:
           PYTHON_VERSION: ${{ matrix.python }}
           DJANGO_VERSION: ${{ matrix.django }}
         run: python -m tox -e "py${PYTHON_VERSION/./}-django${DJANGO_VERSION}"
+  mysql:
+    name: ${{ matrix.image }} / Django ${{ matrix.django }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["mysql:8.4", "mariadb:11.4"]
+        django: ["42", "61"]
+        include:
+          - {django: "42", python: "3.11"}
+          - {django: "61", python: "3.13"}
+          - {image: "mysql:8.4", health: "mysqladmin ping -h localhost -pderived-tests"}
+          - {image: "mariadb:11.4", health: "mariadb-admin ping -h localhost -pderived-tests"}
+    services:
+      mysql:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: derived-tests
+          MARIADB_ROOT_PASSWORD: derived-tests
+          MYSQL_DATABASE: django_derived_relation
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "${{ matrix.health }}"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PASSWORD: derived-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y default-libmysqlclient-dev pkg-config
+      - run: python -m pip install tox
+      - name: Test installed wheel against MySQL or MariaDB
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          DJANGO_VERSION: ${{ matrix.django }}
+        run: python -m tox -e "py${PYTHON_VERSION/./}-django${DJANGO_VERSION}-mysql"
+  oracle:
+    name: Oracle / Django ${{ matrix.django }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - django: "42"
+            python: "3.10"
+            image: gvenzl/oracle-xe:21-slim-faststart
+            service: XEPDB1
+          - django: "61"
+            python: "3.13"
+            image: gvenzl/oracle-free:23.26.3-slim-faststart
+            service: FREEPDB1
+    services:
+      oracle:
+        image: ${{ matrix.image }}
+        env:
+          ORACLE_PASSWORD: derived-tests
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      ORACLE_NAME: localhost:1521/${{ matrix.service }}
+      ORACLE_PASSWORD: derived-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Oracle client for Django 4.2's cx_Oracle driver
+        if: matrix.django == '42'
+        env:
+          ORACLE_CONTAINER: ${{ job.services.oracle.id }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1 libnsl2
+          oracle_home=$(docker exec "$ORACLE_CONTAINER" printenv ORACLE_HOME)
+          # Database-home libraries also need their timezone and NLS data.
+          for directory in lib oracore/zoneinfo nls/data rdbms/mesg; do
+            mkdir -p "$RUNNER_TEMP/oracle-client/$directory"
+            docker cp "$ORACLE_CONTAINER:$oracle_home/$directory/." "$RUNNER_TEMP/oracle-client/$directory/"
+          done
+          echo "ORACLE_HOME=$RUNNER_TEMP/oracle-client" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/oracle-client/lib" >> "$GITHUB_ENV"
+      - run: python -m pip install tox
+      - name: Test installed wheel against Oracle
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          DJANGO_VERSION: ${{ matrix.django }}
+        run: python -m tox -e "py${PYTHON_VERSION/./}-django${DJANGO_VERSION}-oracle"
   lint:
     runs-on: ubuntu-latest
     steps:

@@ -4,6 +4,13 @@ Changelog
 Unreleased
 ----------
 
+* Support ordinary derived joins on SQLite, MySQL, MariaDB, and Oracle, and
+  LATERAL joins on MySQL 8.0.14 or later and Oracle.
+* Preserve NULL results for unmatched MySQL and Oracle LEFT joins with
+  constant or cast projections using ``NO_MERGE`` hints.
+* Run MySQL, MariaDB, and Oracle regression jobs on Django 4.2 and 6.1,
+  alongside the PostgreSQL and SQLite compatibility matrix.
+
 0.2.0 (2026-10-15)
 ------------------
 
