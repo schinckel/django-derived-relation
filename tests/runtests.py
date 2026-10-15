@@ -63,6 +63,7 @@ def database_config(backend: str) -> dict[str, object]:
     else:
         engines = {
             "postgresql": "django.db.backends.postgresql",
+            "postgis": "django.contrib.gis.db.backends.postgis",
             "cockroachdb": "django_cockroachdb",
             "yugabytedb": "django_yugabytedb",
         }
@@ -90,15 +91,19 @@ def main() -> int:
         "firebird",
         "db2",
         "tidb",
+        "postgis",
     ):
         backends.add_argument(
             f"--{backend}", dest="backend", action="store_const", const=backend
         )
     parser.set_defaults(backend="postgresql")
     backend = parser.parse_args().backend
+    apps = ["derived_relations"]
+    if backend == "postgis":
+        apps.extend(["django.contrib.gis", "gis_derived_relations"])
     settings.configure(
         DATABASES={"default": database_config(backend)},
-        INSTALLED_APPS=["derived_relations"],
+        INSTALLED_APPS=apps,
         SECRET_KEY="derived-relation-tests",
         DEFAULT_AUTO_FIELD="django.db.models.AutoField",
         DISABLE_COCKROACHDB_TELEMETRY=True,
@@ -106,7 +111,7 @@ def main() -> int:
     django.setup()
     print("Testing Django", django.get_version())
     return DiscoverRunner(verbosity=1, interactive=False).run_tests(
-        ["derived_relations"]
+        [app for app in apps if app != "django.contrib.gis"]
     )
 
 

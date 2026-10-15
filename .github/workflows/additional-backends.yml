@@ -12,6 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - {backend: postgis, django: "42", flag: postgis}
+          - {backend: postgis, django: "61", flag: postgis}
           - {backend: cockroach, django: "42", flag: cockroachdb}
           - {backend: cockroach, django: "61", flag: cockroachdb}
           - {backend: yugabyte, django: "42", flag: yugabytedb}
@@ -44,6 +46,10 @@ jobs:
           BACKEND: ${{ matrix.backend }}
         run: |
           case "$BACKEND" in
+            postgis)
+              sudo apt-get update
+              sudo apt-get install -y libgeos-c1v5 libgdal-dev
+              ;;
             firebird)
               sudo apt-get update
               sudo apt-get install -y libfbclient2
@@ -59,6 +65,14 @@ jobs:
           TIDB_IMAGE: ${{ matrix.image }}
         run: |
           case "$BACKEND" in
+            postgis)
+              docker run -d --name derived-db --memory 1g -p 127.0.0.1:5432:5432 \
+                -e POSTGRES_PASSWORD=derived-tests postgis/postgis:17-3.5
+              echo 'PGPORT=5432' >> "$GITHUB_ENV"
+              echo 'PGUSER=postgres' >> "$GITHUB_ENV"
+              echo 'PGDATABASE=postgres' >> "$GITHUB_ENV"
+              echo 'PGPASSWORD=derived-tests' >> "$GITHUB_ENV"
+              ;;
             cockroach)
               docker run -d --name derived-db --memory 2g -p 127.0.0.1:26257:26257 \
                 cockroachdb/cockroach:v26.3.1 start-single-node --insecure \

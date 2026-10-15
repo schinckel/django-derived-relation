@@ -4,6 +4,9 @@ Changelog
 Unreleased
 ----------
 
+* Verify PostGIS ordinary and LATERAL joins, including spatial lookups,
+  geometry projections, and distance/area conversions, on Django 4.2 and 6.1.
+
 * Support ordinary and LATERAL joins on CockroachDB, YugabyteDB, and Db2, and
   ordinary joins on Firebird and TiDB with matching third-party backends.
   Support inner LATERAL joins on TiDB 8.5.7+, using its own server version;

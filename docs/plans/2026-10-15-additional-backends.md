@@ -69,6 +69,13 @@ results. Do not merge, tag or publish the pending release in this task.
 
 ### Execution findings
 
+* PostGIS 3.5.2 on PostgreSQL 17.5 passes all 121 tests with Django 4.2.30
+  and 6.1.2 (10/9 expected skips). Five spatial execution tests cover ordinary
+  spatial ON conditions, correlated filtering and nearest-neighbour slicing,
+  geometry and transformed geometry projection, and distance/area conversion
+  and lookups. The native PostGIS backend inherits the PostgreSQL join paths;
+  no production changes are needed. Dedicated CI jobs use the native backend
+  and system GEOS/GDAL libraries.
 * CockroachDB 26.3.1 passes ordinary and lateral joins with published adapters
   4.2 and 6.1 on Django 4.2.30 and 6.1.2.
 * YugabyteDB 2026.1.2.0 passes both join types with django-yugabytedb 4.2.0.1

@@ -40,6 +40,11 @@ using the database versions supported by your Django release. LATERAL joins
 work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
 ``lateral=True`` with ``NotSupportedError``; independent sources still work.
 
+PostGIS uses the PostgreSQL join paths. Both ordinary and LATERAL joins have
+been tested on PostgreSQL 17.5 with PostGIS 3.5.2, using Django 4.2 and 6.1.
+These tests cover spatial ON conditions, correlated nearest-neighbour queries,
+geometry projections and transforms, and distance/area field conversions.
+
 Additional backends have been tested against their published Django adapters:
 
 .. list-table:: Third-party backends
@@ -602,6 +607,12 @@ settings use the standard ``PGDATABASE``, ``PGUSER``, ``PGPASSWORD``, ``PGHOST``
 and ``PGPORT`` environment variables. The database user needs permission to
 create the isolated test database. Run ordinary joins on SQLite with
 ``python tests/runtests.py --sqlite``.
+
+For PostGIS, use ``python tests/runtests.py --postgis`` with the same ``PG*``
+settings, or ``tox -e py312-django61-postgis``. Install GeoDjango's GEOS and
+GDAL libraries first. The database user must also be able to create the
+PostGIS extension in the test database. CI runs this suite on Django 4.2
+and 6.1.
 
 Use ``python tests/runtests.py --mysql`` for MySQL or MariaDB, with
 ``MYSQL_DATABASE``, ``MYSQL_USER``, ``MYSQL_PASSWORD``, ``MYSQL_HOST``, and
