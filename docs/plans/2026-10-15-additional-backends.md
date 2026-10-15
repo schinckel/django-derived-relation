@@ -1,8 +1,7 @@
 # Additional Backend Implementation Plan
 
 **Goal:** Attempt CockroachDB, YugabyteDB, Firebird, Db2 and TiDB using real
-database execution before advertising support. Snowflake was explicitly
-removed from the requested matrix.
+database execution before advertising support.
 
 **Architecture:** Keep the approved backport approach: scoped query/compiler
 adapters, backend-owned compilation and explicit capability overrides. Add
