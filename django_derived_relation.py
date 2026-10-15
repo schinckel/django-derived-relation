@@ -447,7 +447,9 @@ class DerivedCompilerMixin:
     def collapse_group_by(
         self, expressions: list[BaseExpression], having: list[BaseExpression]
     ) -> list[BaseExpression]:
-        if any(isinstance(expression, DerivedCol) for expression in expressions):
+        if self.connection.features.allows_group_by_selected_pks and any(
+            isinstance(expression, DerivedCol) for expression in expressions
+        ):
             return expressions
         return super().collapse_group_by(expressions, having)
 

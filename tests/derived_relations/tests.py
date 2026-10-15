@@ -757,6 +757,24 @@ class DerivedRelationTests(DerivedRelationTestCase):
     "Requires ordinary derived joins.",
 )
 class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
+    def test_grouped_derived_column_with_constant_expression(self) -> None:
+        joined = (
+            Parent.objects.alias(
+                rows=DerivedRelation(Child.objects.values("amount"), join_type="inner")
+            )
+            .annotate(marker=Cast(Value(1), models.IntegerField()))
+            .values("rows__amount", "marker")
+            .annotate(n=Count("pk"))
+        )
+        self.assertEqual(
+            list(
+                joined.order_by("rows__amount").values_list(
+                    "rows__amount", "marker", "n"
+                )
+            ),
+            [(10, 1, 3), (20, 1, 3), (30, 1, 3)],
+        )
+
     def test_date_projection_preserves_null_extension(self) -> None:
         source = Child.objects.filter(amount=10).values(
             "parent_id", day=Cast(Value(date(2026, 10, 13)), models.DateField())
