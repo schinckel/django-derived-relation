@@ -82,12 +82,13 @@ results. Do not merge, tag or publish the pending release in this task.
   store. The native tidb_version descriptor identifies the backend without a
   connection query; MySQL's lateral/version and NO_MERGE paths are excluded.
 * Db2 12.1.0.0 accepts native queries using ibm-db-django 1.5.3.0/1.6.0.0.
-  The Django 4.2 adapter omits run_syncdb during test creation and uses an
-  invalid remote attachment during teardown; that combination stays unverified.
+  The Django 4.2 adapter omits run_syncdb during test creation, and remote
+  teardown fails with SQL1032N; that combination stays unverified.
   The Django 5.2 adapter needs its undeclared Jinja2 import installed. Its
   compiler moves all locking clauses to the outermost SELECT, so source locks
-  must be rejected rather than silently broadening their scope. The remaining
-  suite requires real execution after these compatibility adjustments.
+  must be rejected rather than silently broadening their scope. All 107 tests
+  pass (18 skips) on the actual Db2 server after these adjustments, including
+  ordinary and lateral joins, with the installed wheel on Django 5.2.18.
 
 No type checker or cognitive-complexity analyzer is configured. Changed
 functions were reviewed manually for annotations and control flow.

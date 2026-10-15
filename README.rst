@@ -70,6 +70,11 @@ Additional backends have been tested against their published Django adapters:
      - 4.2, 6.0
      - Yes
      - No
+   * - Db2 (``ibm-db-django``)
+     - 12.1.0.0
+     - 5.2
+     - Yes
+     - Yes
 
 Use the backend package release matching your Django version. TiDB requires
 ``ENGINE = "django_tidb"`` and rejects ``lateral=True`` even when its reported
@@ -80,6 +85,12 @@ Firebird LATERAL joins are currently disabled: a correlated LEFT join can
 return an outer column's value instead of NULL for an unmatched source.
 Firebird also rejects ``select_for_update()`` inside a derived source, as it
 does for native derived tables.
+
+Db2's Django 5.2 backend (``ibm-db-django==1.6.0.0``) also needs Jinja2
+installed. Its compiler moves source locking clauses onto the outer query,
+so this adapter rejects Db2 sources using ``select_for_update()`` with
+``NotSupportedError``. The Django 4.2 Db2 backend remains unverified after
+failures in its native test database setup and teardown.
 
 Backend restrictions and Django's field conversions still apply. In particular,
 Oracle returns an empty string for a NULL projected character field and rejects

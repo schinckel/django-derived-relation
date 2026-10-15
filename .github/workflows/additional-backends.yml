@@ -98,7 +98,7 @@ jobs:
               docker logs derived-db
               exit 1
             fi
-            if docker logs derived-db 2>&1 | grep -q 'Setup has completed'; then
+            if docker logs derived-db 2>&1 | grep -F 'Setup has completed'; then
               exit 0
             fi
             sleep 5

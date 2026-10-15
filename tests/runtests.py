@@ -9,6 +9,7 @@ from django.test.runner import DiscoverRunner
 
 
 def database_config(backend: str) -> dict[str, object]:
+    database: dict[str, object]
     if backend == "sqlite":
         database = {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
     elif backend in {"mysql", "tidb"}:
