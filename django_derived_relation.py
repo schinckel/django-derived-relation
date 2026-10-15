@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
-from django.db.models import Model, QuerySet
-from django.db.models.expressions import Col, ColPairs
-from django.db.models.fields import composite
+from django.db.models import Model, QuerySet, expressions
+from django.db.models.expressions import Col, RawSQL
 from django.db.models.query_utils import Q, refs_expression
+from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
 from django.db.models.sql.query import Query
@@ -30,8 +30,12 @@ if TYPE_CHECKING:
     from django.db.models.expressions import BaseExpression
     from django.db.models.fields import Field
     from django.db.models.lookups import Lookup
-    from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.where import WhereNode
+
+
+_composite_col_types: tuple[type[BaseExpression], ...] = (
+    (expressions.ColPairs,) if hasattr(expressions, "ColPairs") else ()
+)
 
 
 class DerivedCol(Col):
@@ -252,6 +256,10 @@ class DerivedRelation:
         self.source_db = queryset._db
         self.source_for_write: bool = queryset._for_write
 
+    @property
+    def default_alias(self) -> str:
+        raise TypeError("DerivedRelation requires an explicit alias.")
+
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
         raise TypeError(
             "DerivedRelation must be registered with alias() or annotate(); "
@@ -270,19 +278,20 @@ class DerivedRelation:
             raise NotSupportedError(
                 "Combined DerivedRelation sources are not supported."
             )
-        if source.selected is None:
+        if getattr(source, "selected", None) is None and source.default_cols:
             # Match Django's root-model selection, including implicit primary
             # key components, before set_values() clears deferred loading.
-            select_mask = set(composite.unnest(source.get_select_mask()))
-            names = source.values_select or tuple(
-                field.attname
-                for field in source.model._meta.concrete_fields
-                if not select_mask or field in select_mask
+            names = tuple(
+                col.target.attname
+                for col in SQLCompiler(source, None, None).get_default_columns(
+                    source.get_select_mask()
+                )
             )
             source.set_values((*names, *source.annotation_select))
-        if not source.selected:
+        projection = _projected_expressions(source)
+        if not projection:
             raise ValueError("DerivedRelation requires at least one projected column.")
-        if any(not name or "__" in name or "." in name for name in source.selected):
+        if any(not name or "__" in name or "." in name for name in projection):
             raise ValueError(
                 "DerivedRelation column names must be nonempty and cannot "
                 "contain '__' or '.'."
@@ -338,21 +347,15 @@ class DerivedRelation:
         query.alias_map[alias] = join
         query.derived_relations = query.derived_relations | {name}
         if self.condition is not None:
-            join.condition = query.build_filter(
-                self.condition, split_subq=False, update_join_types=False
-            )[0]
+            join.condition = _resolve_join_condition(query, self.condition)
         # ON needs this source's namespace during resolution, but any ordinary
         # relationship dependencies it introduces must precede the source.
         query.alias_map[alias] = query.alias_map.pop(alias)
 
     def _columns(self, source: Query, alias: str, name: str) -> dict[str, DerivedCol]:
         columns: dict[str, DerivedCol] = {}
-        for column, expression in source.selected.items():
-            if isinstance(expression, int):
-                expression = source.select[expression]
-            elif isinstance(expression, str):
-                expression = source.annotations[expression]
-            if isinstance(expression, ColPairs):
+        for column, expression in _projected_expressions(source).items():
+            if isinstance(expression, _composite_col_types):
                 raise ValueError("DerivedRelation requires individually named columns.")
             field = copy(expression.output_field)
             field.null = (
@@ -364,6 +367,32 @@ class DerivedRelation:
             )
             columns[f"{name}__{column}"] = DerivedCol(alias, column, field)
         return columns
+
+
+def _projected_expressions(source: Query) -> dict[str, BaseExpression]:
+    """Read selected expressions across Django's projection representations."""
+    selection = getattr(source, "selected", None)
+    if selection is None:
+        return {
+            **{name: RawSQL(*args) for name, args in source.extra_select.items()},
+            **dict(zip(source.values_select, source.select, strict=True)),
+            **source.annotation_select,
+        }
+    projection: dict[str, BaseExpression] = {}
+    for column, expression in selection.items():
+        if isinstance(expression, int):
+            expression = source.select[expression]
+        elif isinstance(expression, str):
+            expression = source.annotations[expression]
+        projection[column] = expression
+    return projection
+
+
+def _resolve_join_condition(query: Query, condition: Q | BaseExpression) -> WhereNode:
+    if hasattr(query, "build_filtered_relation_q"):
+        # Django 4.2 has a separate ON-clause builder that avoids join promotion.
+        return query.build_filtered_relation_q(Q(condition), reuse=set())
+    return query.build_filter(condition, split_subq=False, update_join_types=False)[0]
 
 
 @lru_cache(maxsize=None)

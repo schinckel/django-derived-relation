@@ -4,6 +4,8 @@ Changelog
 Unreleased
 ----------
 
+* Support Django 4.2 onward, including Python 3.11 with Django 4.2–5.2.
+
 * Allow ``select_for_update()`` on ordinary and LATERAL sources, preserving
   Django's transaction checks and lock options and PostgreSQL's source-row
   locking restrictions.
