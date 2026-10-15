@@ -22,7 +22,12 @@ class InheritedChild(Child):
 
 class CompositeChild(models.Model):
     objects = DerivedQuerySet.as_manager()
-    pk = models.CompositePrimaryKey("parent_id", "sequence")
+    if hasattr(models, "CompositePrimaryKey"):
+        pk = models.CompositePrimaryKey("parent_id", "sequence")
     parent = models.ForeignKey(Parent, models.CASCADE)
     amount = models.IntegerField()
     sequence = models.IntegerField()
+
+
+class NamedColumn(models.Model):
+    value = models.IntegerField(db_column="stored_value")

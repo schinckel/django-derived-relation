@@ -5,6 +5,7 @@ from decimal import Decimal
 from unittest import skipUnless
 from unittest.mock import patch
 
+from django import VERSION
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import NotSupportedError, connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -27,7 +28,7 @@ from django.test import SimpleTestCase, TestCase
 import django_derived_relation
 from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
 
-from .models import Child, CompositeChild, InheritedChild, Parent
+from .models import Child, CompositeChild, InheritedChild, NamedColumn, Parent
 
 
 class PostgreSQLSourceQuery(Query):
@@ -244,6 +245,28 @@ class DerivedRelationTests(TestCase):
             [None, 30, 10],
         )
 
+    def test_bare_source_exposes_field_name_for_custom_database_column(self) -> None:
+        NamedColumn.objects.create(value=40)
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(NamedColumn.objects.only("value"))
+        )
+        self.assertEqual(list(joined.values_list("rows__value", flat=True)), [40])
+        with self.assertRaises(FieldError):
+            joined.values("rows__stored_value")
+
+    def test_bare_source_preserves_extra_column_positions(self) -> None:
+        source = (
+            Child.objects.filter(parent=self.one)
+            .only("amount")
+            .extra(select={"bonus": "42"})
+        )
+        joined = Parent.objects.filter(pk=self.one.pk).alias(
+            rows=DerivedRelation(source)
+        )
+        self.assertEqual(
+            list(joined.values_list("rows__bonus", "rows__amount")), [(42, 10)]
+        )
+
     def test_deferred_sources_match_native_root_columns(self) -> None:
         cases: tuple[tuple[QuerySet, tuple[str, ...]], ...] = (
             (Child.objects.only("amount"), ("id", "amount")),
@@ -279,6 +302,16 @@ class DerivedRelationTests(TestCase):
         for source, names in cases:
             with self.subTest(deferred_loading=source.query.deferred_loading):
                 source = source.filter(parent=self.one)
+                if VERSION[:3] == (4, 2, 0) and source.query.deferred_loading == (
+                    frozenset({"parent_id"}),
+                    True,
+                ):
+                    # Django #34458: deferring an FK attname crashes in 4.2.0.
+                    with self.assertRaises(AttributeError):
+                        source.query.get_compiler(connection=connection).get_select()
+                    with self.assertRaises(AttributeError):
+                        Parent.objects.alias(rows=DerivedRelation(source))
+                    continue
                 native_select = source.query.get_compiler(
                     connection=connection
                 ).get_select()[0]
@@ -332,7 +365,7 @@ class DerivedRelationTests(TestCase):
             [60],
         )
         self.assertEqual(source.query.deferred_loading, (frozenset({"amount"}), False))
-        self.assertIsNone(source.query.selected)
+        self.assertIsNone(getattr(source.query, "selected", None))
         self.assertIsNone(source._result_cache)
         with self.assertRaises(FieldError):
             restored.values("rows__sequence")
@@ -386,6 +419,9 @@ class DerivedRelationTests(TestCase):
         with self.assertRaises(FieldError):
             joined.values("rows__sequence")
 
+    @skipUnless(
+        hasattr(models, "CompositePrimaryKey"), "Requires composite primary keys."
+    )
     def test_composite_primary_key_deferred_source_has_individual_columns(self) -> None:
         CompositeChild.objects.create(parent=self.one, amount=40, sequence=3)
         source = CompositeChild.objects.only("amount").filter(parent=self.one)
@@ -825,12 +861,6 @@ class DerivedRelationTests(TestCase):
                 rows=DerivedRelation(Child.objects.select_related("parent"))
             )
 
-    def test_unsupported_source_shapes(self) -> None:
-        with self.assertRaises(NotSupportedError):
-            Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.all().union(Child.objects.all()))
-            )
-
     def test_reject_correlated_nonlateral_source(self) -> None:
         with self.assertRaisesMessage(ValueError, "require lateral=True"):
             Parent.objects.alias(rows=DerivedRelation(self.source()))
@@ -851,6 +881,56 @@ class DerivedRelationTests(TestCase):
 
 
 class DerivedRelationValidationTests(SimpleTestCase):
+    def test_bare_source_rejects_ambiguous_column_names(self) -> None:
+        for source in (
+            Child.objects.extra(select={"id": "42"}),
+            Child.objects.extra(select={"amount": "42"}),
+            Child.objects.extra(select={"bonus": "42"}).annotate(bonus=Value(1)),
+        ):
+            with self.subTest(extra=source.query.extra_select):
+                with self.assertRaisesMessage(ValueError, "ambiguous column names"):
+                    Parent.objects.alias(rows=DerivedRelation(source))
+
+    def test_registration_preserves_native_source_projection(self) -> None:
+        bare = Child.objects.only("amount")
+        for source in (
+            bare,
+            bare.union(bare.union(bare)),
+            Child.objects.values("amount").union(bare),
+        ):
+            with self.subTest(selected=getattr(source.query, "selected", None)):
+                joined = Parent.objects.alias(rows=DerivedRelation(source))
+                pairs: list[tuple[Query, Query]] = [
+                    (source.query, joined.query.alias_map["rows"].source)
+                ]
+                while pairs:
+                    original, prepared = pairs.pop()
+                    self.assertEqual(
+                        getattr(prepared, "selected", None),
+                        getattr(original, "selected", None),
+                    )
+                    self.assertEqual(
+                        prepared.has_select_fields, original.has_select_fields
+                    )
+                    self.assertEqual(prepared.default_cols, original.default_cols)
+                    self.assertEqual(
+                        prepared.deferred_loading, original.deferred_loading
+                    )
+                    pairs.extend(
+                        zip(
+                            original.combined_queries,
+                            prepared.combined_queries,
+                            strict=True,
+                        )
+                    )
+
+    def test_deferred_combined_projection_keeps_implicit_primary_keys(self) -> None:
+        source = Child.objects.only("amount").union(
+            Child.objects.defer("parent", "sequence")
+        )
+        joined = Parent.objects.alias(rows=DerivedRelation(source))
+        self.assertEqual(tuple(joined.query.annotations), ("rows__id", "rows__amount"))
+
     def test_registration_rejects_model_field_collisions(self) -> None:
         relation = DerivedRelation(Child.objects.values("amount"))
         for queryset, names in (

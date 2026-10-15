@@ -28,8 +28,9 @@ each outer row; ordinary derived joins handle independent results.
 This gives the ORM another way to express the query. Whether it is faster
 depends on the data and execution plan.
 
-This backport targets Django 5.2 and later releases before the core feature is
-available. PostgreSQL is required.
+This backport targets Django 4.2 and later releases before the core feature is
+available. Python 3.10 or later and PostgreSQL are required. Python 3.11 is
+supported with Django 4.2 through 5.2.
 
 Installation
 ============
@@ -346,6 +347,49 @@ other source operations. See GeoDjango's
 `spatial lookups <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/geoquerysets/>`_
 and `distance functions <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/functions/>`_.
 
+Combined querysets as sources
+=============================
+
+Sources can use Django's ``union()``, ``intersection()``, and ``difference()``
+operations, including ``union(..., all=True)``. For existing models ``Foo`` and
+``Bar`` with compatible ``x`` fields:
+
+.. code-block:: python
+
+    source = Foo.objects.values(value=F("x")).union(
+        Bar.objects.values(other=F("x"))
+    )
+    matches = Foo.objects.alias(
+        combined=DerivedRelation(source, condition=Q(combined__value=F("x"))),
+    ).values("x", "combined__value")
+
+Only the outer model needs the adapter manager. As with Django's combined
+querysets, output names and ORM field types come from the first queryset.
+Later operands match columns by position; their names can differ. Operands
+must project the same number of columns with database-compatible types. Use
+``Cast`` in the operands when you need an explicit common type.
+
+On Django 4.2–5.1, SQL groups model columns before annotations. Keep the same
+field/annotation layout in each operand. For renamed columns, use annotations
+in both operands, as above; Django's version-specific projection rules apply.
+
+Without an explicit ``values()`` projection, each operand retains its native
+``only()`` or ``defer()`` selection, including implicit primary-key columns.
+Mismatched projection widths fail as they do for an ordinary combined queryset.
+An explicit combined ``values()`` projection applies to unprojected operands
+using Django's usual rules.
+
+Ordering and slicing on the combined source apply before the join. Correlation
+in any operand, including a nested combination, requires ``lateral=True``.
+``union()`` removes duplicate result rows; ``union(..., all=True)`` retains
+them, so it can multiply outer rows. An empty source retains unmatched outer
+rows with a left join and removes them with an inner join.
+
+These are set-operation sources, not boolean combinations of outer querysets
+using ``&``, ``|``, or ``^``. Those remain unsupported. Django's restrictions on
+operations after a combined queryset and PostgreSQL's locking restrictions
+still apply.
+
 ON conditions and result rows
 =============================
 
@@ -391,8 +435,13 @@ This selects columns from the root model; it does not hydrate deferred model
 instances or joined related objects. An omitted column such as
 ``rows__sequence`` raises ``FieldError`` when referenced and cannot be lazily
 fetched through the derived alias. Foreign keys use their attnames, such as
-``parent_id``, and composite primary keys expose their individual columns.
+``parent_id``, and composite primary keys expose their individual columns on
+Django 5.2 and later.
 Use explicit ``values()`` when output names matter.
+
+Bare sources expose field attnames even when a field defines a different
+``db_column``. If ``extra()`` or annotations produce duplicate column names,
+use an explicit ``values()`` projection to make the output unambiguous.
 
 Locking source rows
 ===================
@@ -443,7 +492,7 @@ LEFT join rows through an empty SQL source and still require a transaction.
 Transaction checks, unsupported-option errors, and PostgreSQL errors propagate
 normally. PostgreSQL rejects locking grouped, aggregate, distinct, and
 set-operation results; adding a locking clause does not make those shapes
-lockable. Combined sources remain unsupported by this adapter.
+lockable.
 
 Restrictions
 ============
@@ -455,9 +504,6 @@ These are implementation limits, not claims that the SQL is impossible.
 Listing them here does not promise future support.
 
 * Backends other than PostgreSQL.
-* Combined sources using ``union()``, ``intersection()``, or ``difference()``.
-  A union of compatible ``values()`` projections is a valid derived-table
-  shape, but the adapter does not yet support it.
 * Updating or deleting an outer queryset containing a derived relation, or
   combining outer querysets with ``&``, ``|``, or ``^``. Use ``Q`` trees for
   combined filter conditions.
@@ -526,17 +572,18 @@ The regression tests cover ordinary and LATERAL joins, typed and deferred projec
 aggregation, null semantics, nesting, cloning, serialization, and validation.
 Independent PostgreSQL connections verify source lock contention, lock options,
 and transaction release; database-free tests check write routing.
-The backport has been verified on Django 5.2.0, 5.2.17, 6.0.0, 6.0.9, 6.1.0,
-and 6.1.2. CI tests Django 5.2 on Python 3.10–3.14, and Django 6.0, 6.1, and development
-main on Python 3.12–3.14. The same matrix runs weekly to catch upstream changes.
+CI runs 24 combinations: Django 4.2 and 5.0 on Python 3.10–3.12; Django 5.1 on
+Python 3.10–3.13; Django 5.2 on Python 3.10–3.14; and Django 6.0, 6.1, and
+development main on Python 3.12–3.14. The same matrix runs weekly to catch
+upstream changes. Composite-key tests run only where Django provides them.
 Each environment installs the built wheel and runs PostgreSQL and SQLite tests.
 
 Run the matrix locally with ``python -m pip install tox`` followed by
 ``tox``. All listed Python interpreters must be installed. To run one
-combination, use ``tox -e py313-django52``. PostgreSQL connection settings are
+combination, use ``tox -e py311-django42``. PostgreSQL connection settings are
 passed through from the ``PG*`` environment variables. Tox runs environments
 sequentially; avoid ``tox -p`` because the runner uses a shared test database.
-Support is intended to continue from Django 5.2 until the feature reaches core;
+Support is intended to continue from Django 4.2 until the feature reaches core;
 future versions require compatibility testing and may need adapter updates.
 
 This implementation originated in an experimental Django core implementation.

@@ -58,6 +58,22 @@ class DerivedRelationLockRoutingTests(SimpleTestCase):
         self.assertEqual(joined.db, "primary")
         self.assertFalse(joined.query.select_for_update)
 
+    def test_later_combined_branch_with_nested_lock_uses_write_router(self) -> None:
+        branch = Parent.objects.alias(
+            nested=DerivedRelation(Child.objects.select_for_update().values("amount"))
+        ).values(amount=F("nested__amount"))
+        for first in (
+            Parent.objects.values(amount=F("minimum")),
+            QuerySet(model=Parent).values(amount=F("minimum")),
+        ):
+            for operand in (branch, first.union(branch)):
+                with self.subTest(adapter=isinstance(first, type(branch))):
+                    source = first.union(operand)
+                    joined = Parent.objects.alias(locked=DerivedRelation(source))
+                    self.assertEqual(joined.db, "primary")
+                    self.assertFalse(joined.query.select_for_update)
+                    self.assertEqual(joined.using("chosen").db, "chosen")
+
     def test_explicit_outer_database_keeps_native_precedence(self) -> None:
         source = Child.objects.select_for_update().values("id")
         joined = Parent.objects.using("chosen").alias(locked=DerivedRelation(source))
@@ -198,11 +214,37 @@ class DerivedRelationLockingTests(TransactionTestCase):
                     self._assert_unlocked(peer, self.parent)
                 self._assert_unlocked(peer, self.first)
 
+    def test_later_combined_branch_retains_nested_source_locks(self) -> None:
+        first = (
+            Child.objects.filter(pk=self.first.pk).order_by().values("id", "parent_id")
+        )
+        locked = self._source(False).filter(pk=self.second.pk).select_for_update()
+        later = (
+            Child.objects.filter(pk=self.second.pk)
+            .alias(nested=DerivedRelation(locked.values("id"), join_type="inner"))
+            .order_by()
+            .values("id", "parent_id")
+        )
+        for operand in (later, first.union(later)):
+            with (
+                self.subTest(nested=bool(operand.query.combinator)),
+                self._peer() as peer,
+            ):
+                with transaction.atomic():
+                    self.assertEqual(
+                        list(self._rows(first.union(operand))),
+                        [self.first.pk, self.second.pk],
+                    )
+                    self._assert_unlocked(peer, self.first)
+                    self._assert_locked(peer, self.second)
+                    self._assert_unlocked(peer, self.parent)
+                self._assert_unlocked(peer, self.second)
+
     @skipUnlessDBFeature("has_select_for_update_of")
     def test_deferred_source_preserves_projection_and_locks(self) -> None:
         for source in (
             self._source(True).only("amount"),
-            self._source(True).defer("parent_id", "sequence"),
+            self._source(True).defer("parent", "sequence"),
         ):
             with (
                 self.subTest(deferred=source.query.deferred_loading),

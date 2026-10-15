@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
-from django.db.models import Model, QuerySet
-from django.db.models.expressions import Col, ColPairs
-from django.db.models.fields import composite
+from django.db.models import Model, QuerySet, expressions
+from django.db.models.expressions import Col, RawSQL
 from django.db.models.query_utils import Q, refs_expression
+from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
 from django.db.models.sql.query import Query
@@ -30,8 +30,12 @@ if TYPE_CHECKING:
     from django.db.models.expressions import BaseExpression
     from django.db.models.fields import Field
     from django.db.models.lookups import Lookup
-    from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.where import WhereNode
+
+
+_composite_col_types: tuple[type[BaseExpression], ...] = (
+    (expressions.ColPairs,) if hasattr(expressions, "ColPairs") else ()
+)
 
 
 class DerivedCol(Col):
@@ -118,6 +122,7 @@ class DerivedJoin(BaseTable):
         condition: WhereNode | None,
         join_type: str,
         lateral: bool,
+        column_names: tuple[str, ...],
         source_db: str | None = None,
     ) -> None:
         super().__init__(name, alias)
@@ -126,6 +131,7 @@ class DerivedJoin(BaseTable):
         self.condition = condition
         self.join_type = join_type
         self.lateral = lateral
+        self.column_names = column_names
         self.nullable = join_type == LOUTER
         self.source_db = source_db
 
@@ -172,9 +178,15 @@ class DerivedJoin(BaseTable):
             except EmptyResultSet:
                 on_sql = "FALSE"
         lateral = " LATERAL" if self.lateral else ""
+        alias_sql = compiler.connection.ops.quote_name(self.table_alias)
+        # Declare public names by position without changing the source's SELECT.
+        # This also preserves names when Django elides an empty first operand.
+        names = ", ".join(
+            compiler.connection.ops.quote_name(column) for column in self.column_names
+        )
+        alias_sql += f"({names})"
         return (
-            f"{self.join_type}{lateral} {sql} "
-            f"{compiler.connection.ops.quote_name(self.table_alias)} ON ({on_sql})",
+            f"{self.join_type}{lateral} {sql} " f"{alias_sql} ON ({on_sql})",
             (*params, *on_params),
         )
 
@@ -201,6 +213,7 @@ class DerivedJoin(BaseTable):
             self.condition,
             self.join_type,
             self.lateral,
+            self.column_names,
             self.source_db,
         )
 
@@ -250,7 +263,13 @@ class DerivedRelation:
         self.join_type = INNER if join_type == "inner" else LOUTER
         self.lateral = lateral
         self.source_db = queryset._db
-        self.source_for_write: bool = queryset._for_write
+        self.source_for_write: bool = queryset._for_write or _has_source_locks(
+            self.query
+        )
+
+    @property
+    def default_alias(self) -> str:
+        raise TypeError("DerivedRelation requires an explicit alias.")
 
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
         raise TypeError(
@@ -258,36 +277,52 @@ class DerivedRelation:
             "it cannot be used as a scalar expression."
         )
 
-    def _projection(self) -> Query:
-        source = self.query.clone()
-        source.__class__ = _query_class(type(source))
-        if source.select_related:
-            raise ValueError(
-                "DerivedRelation sources using select_related() "
-                "require an explicit values() projection."
+    def _projection(self, source: Query) -> dict[str, BaseExpression]:
+        projection: dict[str, BaseExpression] = {}
+        selection = getattr(source, "selected", None)
+        if selection is None:
+            # get_default_columns() uses model/query metadata, without rendering
+            # SQL or choosing a database. Keep Django's deferred mask intact.
+            cols = (
+                SQLCompiler(source, None, None).get_default_columns(
+                    source.get_select_mask()
+                )
+                if source.default_cols
+                else source.select
             )
-        if source.combinator:
-            raise NotSupportedError(
-                "Combined DerivedRelation sources are not supported."
-            )
-        if source.selected is None:
-            # Match Django's root-model selection, including implicit primary
-            # key components, before set_values() clears deferred loading.
-            select_mask = set(composite.unnest(source.get_select_mask()))
-            names = source.values_select or tuple(
-                field.attname
-                for field in source.model._meta.concrete_fields
-                if not select_mask or field in select_mask
-            )
-            source.set_values((*names, *source.annotation_select))
-        if not source.selected:
+            selected: list[tuple[str, BaseExpression]] = [
+                *(
+                    (column, RawSQL(*args))
+                    for column, args in source.extra_select.items()
+                ),
+                *zip(
+                    source.values_select or tuple(col.target.attname for col in cols),
+                    cols,
+                    strict=True,
+                ),
+                *source.annotation_select.items(),
+            ]
+            projection = dict(selected)
+            if len(projection) != len(selected):
+                raise ValueError(
+                    "DerivedRelation source has ambiguous column names. "
+                    "Use an explicit values() projection."
+                )
+        else:
+            for column, expression in selection.items():
+                if isinstance(expression, int):
+                    expression = source.select[expression]
+                elif isinstance(expression, str):
+                    expression = source.annotations[expression]
+                projection[column] = expression
+        if not projection:
             raise ValueError("DerivedRelation requires at least one projected column.")
-        if any(not name or "__" in name or "." in name for name in source.selected):
+        if any(not name or "__" in name or "." in name for name in projection):
             raise ValueError(
                 "DerivedRelation column names must be nonempty and cannot "
                 "contain '__' or '.'."
             )
-        return source
+        return projection
 
     def add_to_query(self, query: Query, name: str) -> None:
         query.check_alias(name)
@@ -312,7 +347,9 @@ class DerivedRelation:
         ):
             raise ValueError(f"The relation name {name!r} is already in use.")
         parent_alias = query.get_initial_alias()
-        source = self._projection().resolve_expression(query)
+        source = self.query.clone()
+        _prepare_source_query(source)
+        source = source.resolve_expression(query)
         if not self.lateral and source.get_external_cols():
             raise ValueError("Correlated DerivedRelation sources require lateral=True.")
         alias, _ = query.table_alias(name, create=True)
@@ -333,31 +370,28 @@ class DerivedRelation:
             None,
             self.join_type,
             self.lateral,
+            tuple(column.column for column in columns.values()),
             self.source_db,
         )
         query.alias_map[alias] = join
         query.derived_relations = query.derived_relations | {name}
         if self.condition is not None:
-            join.condition = query.build_filter(
-                self.condition, split_subq=False, update_join_types=False
-            )[0]
+            join.condition = _resolve_join_condition(query, self.condition)
         # ON needs this source's namespace during resolution, but any ordinary
         # relationship dependencies it introduces must precede the source.
         query.alias_map[alias] = query.alias_map.pop(alias)
 
     def _columns(self, source: Query, alias: str, name: str) -> dict[str, DerivedCol]:
         columns: dict[str, DerivedCol] = {}
-        for column, expression in source.selected.items():
-            if isinstance(expression, int):
-                expression = source.select[expression]
-            elif isinstance(expression, str):
-                expression = source.annotations[expression]
-            if isinstance(expression, ColPairs):
+        for column, expression in self._projection(source).items():
+            if isinstance(expression, _composite_col_types):
                 raise ValueError("DerivedRelation requires individually named columns.")
             field = copy(expression.output_field)
             field.null = (
                 self.join_type == LOUTER
                 or field.null
+                # Later set-operation operands can supply NULL values.
+                or bool(source.combinator)
                 or not isinstance(expression, Col)
                 or expression.alias not in source.alias_map
                 or source.alias_map[expression.alias].join_type == LOUTER
@@ -382,6 +416,45 @@ def _restore_query(base: type[Query], state: dict[str, object]) -> Query:
     query = object.__new__(_query_class(base))
     query.__dict__.update(state)
     return query
+
+
+def _resolve_join_condition(query: Query, condition: Q | BaseExpression) -> WhereNode:
+    if hasattr(query, "build_filtered_relation_q"):
+        # Django 4.2 has a separate ON-clause builder that avoids join promotion.
+        return query.build_filtered_relation_q(Q(condition), reuse=set())
+    return query.build_filter(condition, split_subq=False, update_join_types=False)[0]
+
+
+def _has_source_locks(query: Query) -> bool:
+    """Find locks whose write-routing flag a compound queryset can lose."""
+    return (
+        query.select_for_update
+        or any(_has_source_locks(branch) for branch in query.combined_queries)
+        or any(
+            _has_source_locks(join.source)
+            for join in query.alias_map.values()
+            if isinstance(join, DerivedJoin)
+        )
+    )
+
+
+def _prepare_source_query(query: Query) -> None:
+    """Adapt an already-cloned tree, preserving native source projections."""
+    if query.select_related:
+        raise ValueError(
+            "DerivedRelation sources using select_related() "
+            "require an explicit values() projection."
+        )
+    if not isinstance(query, DerivedQueryMixin):
+        # Native Query.clone() doesn't copy these mutable containers deeply.
+        query.table_map = {
+            table: aliases[:] for table, aliases in query.table_map.items()
+        }
+        if getattr(query, "selected", None) is not None:
+            query.selected = query.selected.copy()
+        query.__class__ = _query_class(type(query))
+    for branch in query.combined_queries:
+        _prepare_source_query(branch)
 
 
 class DerivedCompilerMixin:
@@ -413,6 +486,17 @@ class DerivedCompilerMixin:
 
 class DerivedQueryMixin:
     derived_relations: frozenset[str] = frozenset()
+
+    def clone(self) -> Query:
+        clone = super().clone()
+        # Compilation can add compound-ordering columns to selected and joins
+        # to table_map. Keep those changes on the compiler's private clone.
+        if getattr(clone, "selected", None) is not None:
+            clone.selected = clone.selected.copy()
+        clone.table_map = {
+            table: aliases[:] for table, aliases in clone.table_map.items()
+        }
+        return clone
 
     def __reduce__(self) -> tuple[
         Callable[[type[Query], dict[str, object]], Query],
@@ -486,6 +570,8 @@ class DerivedQueryMixin:
 
     def get_external_cols(self) -> list[Col]:
         columns = super().get_external_cols()
+        for branch in self.combined_queries:
+            columns.extend(branch.get_external_cols())
         for source in self.alias_map.values():
             if isinstance(source, DerivedJoin):
                 columns.extend(
