@@ -29,8 +29,31 @@ This gives the ORM another way to express the query. Whether it is faster
 depends on the data and execution plan.
 
 This backport targets Django 4.2 and later releases before the core feature is
-available. Python 3.10 or later and PostgreSQL are required. Python 3.11 is
+available. Python 3.10 or later is required. Python 3.11 is
 supported with Django 4.2 through 5.2.
+
+Database support
+================
+
+Ordinary derived joins work on PostgreSQL, SQLite, MySQL, MariaDB, and Oracle,
+using the database versions supported by your Django release. LATERAL joins
+work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
+``lateral=True`` with ``NotSupportedError``; independent sources still work.
+
+Backend restrictions and Django's field conversions still apply. In particular,
+Oracle returns an empty string for a NULL projected character field and rejects
+``select_for_update()`` inside a derived source. MySQL date literals may need
+``Cast(..., DateField())`` to return date objects, just as in an ordinary Django
+query.
+
+MySQL and Oracle sources use a ``NO_MERGE`` query hint to preserve NULL results
+from unmatched LEFT joins when the source projects constants or casts. This
+can change the execution plan and materialise the source.
+
+Oracle can order incorrectly when a LATERAL source projects an ``OuterRef`` to
+the outer ordering field and that outer field is absent from the final select
+list. Include the outer ordering field in ``values()`` or ``values_list()``,
+or order by another field. This also occurs with native Oracle SQL.
 
 Installation
 ============
@@ -352,7 +375,7 @@ ON conditions and result rows
 
 ``DerivedRelation(queryset, condition=None, join_type="left", lateral=False)``
 accepts a ``Q`` tree or boolean expression as its condition. It preserves that
-condition for both ordinary and LATERAL joins. No condition means ``ON TRUE``.
+condition for both ordinary and LATERAL joins. No condition means ``ON (1=1)``.
 
 A condition can use the outer model's fields, this source's columns, or columns
 from a previously registered derived relation. Register dependencies first;
@@ -399,7 +422,7 @@ Use explicit ``values()`` when output names matter.
 Locking source rows
 ===================
 
-Sources can use ``select_for_update()`` where Django and PostgreSQL support
+Sources can use ``select_for_update()`` where Django and the database support
 row locking. Evaluate the outer queryset inside ``transaction.atomic()``;
 registration alone does not execute SQL or acquire locks.
 
@@ -423,7 +446,9 @@ registration alone does not execute SQL or acquire locks.
 Source locks apply to the underlying source rows. They do not lock the outer
 model merely because it joins the source. Calling ``select_for_update()`` on
 the outer queryset is a separate operation, subject to Django's and
-PostgreSQL's normal restrictions on locking joined tables.
+the database's normal restrictions on locking joined tables. Oracle permits
+``FOR UPDATE`` only in a top-level SELECT, so locking derived sources raise
+its native database error. SQLite has no row-locking support.
 
 A locking source routes the outer queryset through Django's write router,
 including when the lock is inside a nested derived source. Explicit outer
@@ -456,7 +481,6 @@ Currently unsupported
 These are implementation limits, not claims that the SQL is impossible.
 Listing them here does not promise future support.
 
-* Backends other than PostgreSQL.
 * Combined sources using ``union()``, ``intersection()``, or ``difference()``.
   A union of compatible ``values()`` projections is a valid derived-table
   shape, but the adapter does not yet support it.
@@ -521,8 +545,20 @@ Install development dependencies with ``python -m pip install -e '.[test]'``.
 Run ``python tests/runtests.py`` against a local PostgreSQL server. Connection
 settings use the standard ``PGDATABASE``, ``PGUSER``, ``PGPASSWORD``, ``PGHOST``,
 and ``PGPORT`` environment variables. The database user needs permission to
-create the isolated test database. SQLite validation can be run with
-``python tests/runtests.py --sqlite``; execution tests require PostgreSQL.
+create the isolated test database. Run ordinary joins on SQLite with
+``python tests/runtests.py --sqlite``.
+
+Use ``python tests/runtests.py --mysql`` for MySQL or MariaDB, with
+``MYSQL_DATABASE``, ``MYSQL_USER``, ``MYSQL_PASSWORD``, ``MYSQL_HOST``, and
+``MYSQL_PORT``. Install ``mysqlclient`` first. The user must be able to create
+and drop the isolated test database.
+
+Use ``python tests/runtests.py --oracle`` with ``ORACLE_NAME`` (an Easy Connect
+name such as ``localhost:1521/FREEPDB1``), ``ORACLE_USER``, and
+``ORACLE_PASSWORD``. Install ``oracledb`` on Django 5.0 or later; Django 4.2
+requires ``cx_Oracle`` and Oracle Client libraries. The runner creates and drops
+an isolated test user in the existing USERS and TEMP tablespaces; its database
+user needs permission to do that.
 
 The regression tests cover ordinary and LATERAL joins, typed and deferred projections,
 aggregation, null semantics, nesting, cloning, serialization, and validation.
@@ -533,12 +569,19 @@ Python 3.10–3.13; Django 5.2 on Python 3.10–3.14; and Django 6.0, 6.1, and
 development main on Python 3.12–3.14. The same matrix runs weekly to catch
 upstream changes. Composite-key tests run only where Django provides them.
 Each environment installs the built wheel and runs PostgreSQL and SQLite tests.
+Additional service-container jobs run MySQL 8.4, MariaDB 11.4, and Oracle on
+Django 4.2 and 6.1. Oracle 4.2 uses XE 21 and ``cx_Oracle``; Oracle 6.1 uses
+Free and ``oracledb``. Unsupported LATERAL tests are skipped on SQLite and
+MariaDB, while their ordinary joins execute against the real backend.
 
 Run the matrix locally with ``python -m pip install tox`` followed by
 ``tox``. All listed Python interpreters must be installed. To run one
 combination, use ``tox -e py311-django42``. PostgreSQL connection settings are
 passed through from the ``PG*`` environment variables. Tox runs environments
 sequentially; avoid ``tox -p`` because the runner uses a shared test database.
+For another backend, append ``-mysql`` or ``-oracle`` to the environment name,
+for example ``tox -e py311-django42-mysql``. Their connection variables and
+``LD_LIBRARY_PATH`` are passed through too.
 Support is intended to continue from Django 4.2 until the feature reaches core;
 future versions require compatibility testing and may need adapter updates.
 
