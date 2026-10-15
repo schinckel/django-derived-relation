@@ -1142,6 +1142,150 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         self.assertEqual(joined.exclude(rows__amount=F("children__amount")).count(), 9)
 
 
+@skipUnless(
+    connection.vendor == "mysql"
+    and hasattr(type(connections["default"]), "tidb_version")
+    and connection.tidb_version >= (8, 5, 7),
+    "Requires TiDB 8.5.7+ inner LATERAL joins.",
+)
+class TiDBInnerDerivedRelationTests(DerivedRelationTestCase):
+    def joined(
+        self, source: QuerySet[Child], condition: Q | None = None
+    ) -> QuerySet[Parent]:
+        return Parent.objects.alias(
+            rows=DerivedRelation(
+                source, lateral=True, join_type="inner", condition=condition
+            )
+        )
+
+    def test_values_and_unused_join_cardinality(self) -> None:
+        joined = self.joined(self.source())
+        self.assertEqual(joined.count(), 3)
+        self.assertEqual(
+            list(
+                joined.order_by("name", "rows__amount").values_list(
+                    "name", "rows__amount"
+                )
+            ),
+            [("many", 20), ("many", 30), ("one", 10)],
+        )
+        self.assertEqual(
+            joined.filter(Q(name="empty") | Q(rows__amount__gt=0)).count(), 3
+        )
+
+    def test_ordered_slice_precedes_on_condition(self) -> None:
+        source = self.source().order_by("-sequence", "pk")[:1]
+        joined = self.joined(source, Q(rows__amount__lt=25))
+        self.assertEqual(
+            list(joined.values_list("name", "rows__amount")), [("one", 10)]
+        )
+
+    def test_empty_sources(self) -> None:
+        for source in (
+            self.source().none(),
+            self.source().filter(pk__in=[]),
+            self.source().filter(amount__gt=1000),
+            self.source()[:0],
+        ):
+            with self.subTest(source_type=type(source.query).__name__):
+                self.assertEqual(self.joined(source).count(), 0)
+
+    def test_source_grouping_and_outer_aggregation(self) -> None:
+        source = (
+            self.source()
+            .values("parent_id")
+            .annotate(total=Sum("amount"))
+            .values("total")
+        )
+        joined = self.joined(source)
+        self.assertEqual(
+            list(joined.order_by("name").values_list("name", "rows__total")),
+            [("many", 50), ("one", 10)],
+        )
+        self.assertEqual(joined.aggregate(total=Sum("rows__total")), {"total": 60})
+        grouped = (
+            self.joined(self.source())
+            .values("name")
+            .annotate(total=Sum("rows__amount"))
+        )
+        self.assertEqual(
+            list(grouped.order_by("name").values_list("name", "total")),
+            [("many", 50), ("one", 10)],
+        )
+
+    def test_parameter_order(self) -> None:
+        source = (
+            self.source()
+            .filter(amount__gt=5)
+            .annotate(mark=Value("source"))
+            .values("amount", "mark")
+        )
+        joined = (
+            Parent.objects.annotate(label=Value("select"))
+            .alias(
+                rows=DerivedRelation(
+                    source,
+                    lateral=True,
+                    join_type="inner",
+                    condition=Q(rows__amount__gt=15),
+                )
+            )
+            .filter(name="many")
+        )
+        self.assertEqual(
+            joined.query.sql_with_params()[1], ("select", "source", 5, 15, "many")
+        )
+        self.assertEqual(
+            list(
+                joined.order_by("rows__amount").values_list(
+                    "label", "rows__mark", "rows__amount"
+                )
+            ),
+            [("select", "source", 20), ("select", "source", 30)],
+        )
+
+    def test_outer_reference_projection(self) -> None:
+        joined = self.joined(self.source().values(parent_name=OuterRef("name")))
+        self.assertEqual(
+            list(joined.order_by("name").values_list("rows__parent_name", flat=True)),
+            ["many", "many", "one"],
+        )
+
+    def test_repeated_and_dependent_sources(self) -> None:
+        descriptor = DerivedRelation(self.source(), lateral=True, join_type="inner")
+        repeated = Parent.objects.alias(a=descriptor, b=descriptor)
+        self.assertEqual(repeated.count(), 5)
+        dependent = Parent.objects.alias(
+            a=descriptor,
+            b=DerivedRelation(
+                Child.objects.filter(amount=OuterRef("a__amount")).values("amount"),
+                lateral=True,
+                join_type="inner",
+            ),
+        )
+        self.assertEqual(
+            list(dependent.order_by("b__amount").values_list("b__amount", flat=True)),
+            [10, 20, 30],
+        )
+
+    def test_nested_subquery_and_exists(self) -> None:
+        joined = self.joined(self.source()).filter(pk=OuterRef("pk"))
+        parents = Parent.objects.annotate(
+            amount=Subquery(joined.order_by("rows__amount").values("rows__amount")[:1]),
+            found=Exists(joined),
+        )
+        self.assertEqual(
+            list(parents.order_by("name").values_list("amount", "found")),
+            [(None, False), (20, True), (10, True)],
+        )
+
+    def test_computed_null_projection(self) -> None:
+        source = self.source().values(
+            total=Subquery(Child.objects.filter(pk=-1).values("amount"))
+        )
+        self.assertEqual(self.joined(source).exclude(rows__total=1).count(), 3)
+
+
 class DerivedRelationValidationTests(SimpleTestCase):
     def test_mysql_lateral_version_boundary(self) -> None:
         for version, mariadb, supported in (
@@ -1168,7 +1312,7 @@ class DerivedRelationValidationTests(SimpleTestCase):
                     with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
                         joined.query.sql_with_params()
 
-    def test_tidb_ordinary_only_despite_mysql_version(self) -> None:
+    def test_tidb_lateral_version_and_join_type(self) -> None:
         with (
             patch.object(connection, "vendor", "mysql"),
             patch.dict(connections["default"].__dict__, mysql_version=(8, 0, 14)),
@@ -1181,11 +1325,28 @@ class DerivedRelationValidationTests(SimpleTestCase):
                 rows=DerivedRelation(Child.objects.values("amount"))
             )
             self.assertNotIn("NO_MERGE", joined.query.sql_with_params()[0])
-            lateral = Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
-            )
-            with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
-                lateral.query.sql_with_params()
+            for version in ((8, 5, 6), (8, 5, 7), (8, 5, 8)):
+                for kind in ("inner", "left"):
+                    with (
+                        self.subTest(version=version, kind=kind),
+                        patch.dict(
+                            connections["default"].__dict__, tidb_version=version
+                        ),
+                    ):
+                        lateral = Parent.objects.alias(
+                            rows=DerivedRelation(
+                                Child.objects.values("amount"),
+                                lateral=True,
+                                join_type=kind,
+                            )
+                        )
+                        if version >= (8, 5, 7) and kind == "inner":
+                            self.assertIn(
+                                " LATERAL ", lateral.query.sql_with_params()[0]
+                            )
+                        else:
+                            with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
+                                lateral.query.sql_with_params()
 
     def test_firebird_rejects_lateral(self) -> None:
         with patch.object(connection, "vendor", "firebird"):

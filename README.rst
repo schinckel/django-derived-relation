@@ -66,10 +66,10 @@ Additional backends have been tested against their published Django adapters:
      - Yes
      - No
    * - TiDB (``django-tidb``)
-     - 8.5.3
+     - 8.5.6, 8.5.7, 8.5.8
      - 4.2, 6.0
      - Yes
-     - No
+     - Inner joins on 8.5.7+
    * - Db2 (``ibm-db-django``)
      - 12.1.0.0
      - 5.2
@@ -77,9 +77,12 @@ Additional backends have been tested against their published Django adapters:
      - Yes
 
 Use the backend package release matching your Django version. TiDB requires
-``ENGINE = "django_tidb"`` and rejects ``lateral=True`` even when its reported
-MySQL compatibility version would allow it. Its CI tests use the TiDB SQL
-server with disposable local storage.
+``ENGINE = "django_tidb"``. From TiDB 8.5.7, correlated sources can use
+``lateral=True, join_type="inner"``. LEFT LATERAL joins remain unsupported;
+the default ``join_type="left"`` raises ``NotSupportedError``. Capability
+checks use the TiDB server version, independently of its reported MySQL
+compatibility version. CI tests use the TiDB SQL server with disposable
+local storage.
 
 Firebird LATERAL joins are currently disabled: a correlated LEFT join can
 return an outer column's value instead of NULL for an unmatched source.

@@ -6,7 +6,8 @@ Unreleased
 
 * Support ordinary and LATERAL joins on CockroachDB, YugabyteDB, and Db2, and
   ordinary joins on Firebird and TiDB with matching third-party backends.
-  Reject LATERAL joins on TiDB regardless of its MySQL compatibility version.
+  Support inner LATERAL joins on TiDB 8.5.7+, using its own server version;
+  reject LEFT LATERAL joins.
   Reject Db2 source locks that its backend would apply to the outer query.
 
 * Support ordinary derived joins on SQLite, MySQL, MariaDB, and Oracle, and

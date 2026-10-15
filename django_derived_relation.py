@@ -156,7 +156,7 @@ class DerivedJoin(BaseTable):
             },
         ):
             raise NotSupportedError("This backend does not support DerivedRelation.")
-        if self.lateral and not _supports_lateral_joins(connection):
+        if self.lateral and not _supports_lateral_joins(connection, self.join_type):
             raise NotSupportedError("This backend does not support LATERAL joins.")
         if connection.vendor == "DB2" and self.source.select_for_update:
             # ibm-db-django moves every locking clause to the outermost SELECT.
@@ -438,12 +438,14 @@ def _is_tidb(connection: BaseDatabaseWrapper) -> bool:
     return hasattr(type(connection), "tidb_version")
 
 
-def _supports_lateral_joins(connection: BaseDatabaseWrapper) -> bool:
+def _supports_lateral_joins(connection: BaseDatabaseWrapper, join_type: str) -> bool:
     supported = getattr(connection.features, "supports_lateral_joins", None)
     if supported is not None:
         return bool(supported)
     if connection.vendor == "mysql":
-        if _is_tidb(connection) or connection.mysql_is_mariadb:
+        if _is_tidb(connection):
+            return join_type == INNER and connection.tidb_version >= (8, 5, 7)
+        if connection.mysql_is_mariadb:
             return False
         return connection.mysql_version >= (8, 0, 14)
     return connection.vendor in {

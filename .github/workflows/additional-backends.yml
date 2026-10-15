@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   backend:
-    name: ${{ matrix.backend }} / Django ${{ matrix.django }}
+    name: ${{ matrix.image || matrix.backend }} / Django ${{ matrix.django }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -17,8 +17,12 @@ jobs:
           - {backend: yugabyte, django: "42", flag: yugabytedb}
           - {backend: firebird, django: "52", flag: firebird}
           - {backend: firebird, django: "61", flag: firebird}
-          - {backend: tidb, django: "42", flag: tidb}
-          - {backend: tidb, django: "60", flag: tidb}
+          - {backend: tidb, django: "42", flag: tidb, image: "pingcap/tidb:v8.5.6"}
+          - {backend: tidb, django: "60", flag: tidb, image: "pingcap/tidb:v8.5.6"}
+          - {backend: tidb, django: "42", flag: tidb, image: "pingcap/tidb:v8.5.7"}
+          - {backend: tidb, django: "60", flag: tidb, image: "pingcap/tidb:v8.5.7"}
+          - {backend: tidb, django: "42", flag: tidb, image: "pingcap/tidb:v8.5.8"}
+          - {backend: tidb, django: "60", flag: tidb, image: "pingcap/tidb:v8.5.8"}
           - {backend: db2, django: "52", flag: db2}
     env:
       TOX_ENV: py312-django${{ matrix.django }}-${{ matrix.backend }}
@@ -52,6 +56,7 @@ jobs:
       - name: Start disposable database
         env:
           BACKEND: ${{ matrix.backend }}
+          TIDB_IMAGE: ${{ matrix.image }}
         run: |
           case "$BACKEND" in
             cockroach)
@@ -77,7 +82,7 @@ jobs:
             tidb)
               # Exercise the real TiDB SQL engine with disposable local storage.
               docker run -d --name derived-db --memory 2g -p 127.0.0.1:4000:4000 \
-                pingcap/tidb:v8.5.3 --store=unistore --path=/tmp/derived-tidb \
+                "$TIDB_IMAGE" --store=unistore --path=/tmp/derived-tidb \
                 --advertise-address=127.0.0.1
               ;;
             db2)

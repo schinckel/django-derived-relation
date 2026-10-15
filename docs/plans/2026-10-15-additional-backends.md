@@ -6,7 +6,8 @@ database execution before advertising support.
 **Architecture:** Keep the approved backport approach: scoped query/compiler
 adapters, backend-owned compilation and explicit capability overrides. Add
 only backend distinctions required by observed behaviour; no core hooks or
-global monkey patches. TiDB supports ordinary derived joins only.
+global monkey patches. Verify TiDB correlation by server version and join
+type; the earlier ordinary-only description is not a scope restriction.
 
 **Tech Stack:** Django, the published third-party backend packages, official
 database containers, tox and GitHub Actions.
@@ -31,7 +32,8 @@ Create isolated, disposable databases with official images. Confirm native ORM
 setup/CRUD before derived joins, then observe the adapter's unsupported-backend
 failure. Run ordinary and correlated left/inner joins, projection, grouping,
 ordering/slicing, conditions after slicing, constants/empty sources, parameter
-order, nesting and native locking where supported. TiDB must reject LATERAL.
+order, nesting and native locking where supported. Check TiDB's ordinary,
+inner lateral and left lateral joins independently.
 Do not substitute PostgreSQL/MySQL execution or mocked SQL for the real engine.
 An incompatible backend remains unsupported with an evidence-backed reason.
 
@@ -77,10 +79,17 @@ results. Do not merge, tag or publish the pending release in this task.
   Django 5.2.18/6.1.2. Its lateral LEFT join lifts projected outer references
   above NULL extension, including with an OFFSET 0 wrapper. Lateral joins stay
   disabled. Native SQL also rejects FOR UPDATE inside derived tables.
-* TiDB 8.5.3 passes ordinary joins with django-tidb 4.2.6/6.0.1 on Django
-  4.2.30/6.0.9. Tests execute its real SQL server using the unistore local test
-  store. The native tidb_version descriptor identifies the backend without a
-  connection query; MySQL's lateral/version and NO_MERGE paths are excluded.
+* TiDB 8.5.6 rejects LATERAL syntax. TiDB 8.5.7 and 8.5.8 execute INNER JOIN
+  LATERAL, reject LEFT JOIN LATERAL, and reject implicit correlation and APPLY.
+  Nine inner-join execution regressions cover multiplicity, ordering/slicing,
+  post-slice ON conditions, empty sources, grouping, aggregation, parameter
+  order, outer-reference projections, dependent sources and nested subqueries.
+  All 116 tests pass on 8.5.7/8.5.8 with django-tidb 4.2.6/6.0.1 and Django
+  4.2.30/6.0.9 (67/68 expected skips). Native server execution contradicts the
+  stable documentation's parsing-only description. Tests use the real TiDB SQL
+  server with the unistore local store. The native tidb_version descriptor
+  identifies the backend; its own version controls inner lateral support,
+  independently of MySQL's compatibility version and optimizer-hint paths.
 * Db2 12.1.0.0 accepts native queries using ibm-db-django 1.5.3.0/1.6.0.0.
   The Django 4.2 adapter omits run_syncdb during test creation, and remote
   teardown fails with SQL1032N; that combination stays unverified.
