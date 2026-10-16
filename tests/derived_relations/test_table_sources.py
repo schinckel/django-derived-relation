@@ -1,5 +1,5 @@
 from django.core.exceptions import FieldError
-from django.db.models import Count, Exists, F, Q, QuerySet, Subquery, Value
+from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Abs
 
 from .base import DerivedRelationTestCase
@@ -117,3 +117,33 @@ class TableSourceTests(DerivedRelationTestCase):
             Parent.objects.alias(name=Child.objects.values("amount", "sequence"))
         query = self.query().alias(rows=Value(7)).annotate(chosen=F("rows"))
         self.assertEqual(list(query.values_list("chosen", flat=True)), [7] * 3)
+
+    def test_tuple_lookup(self) -> None:
+        query = self.query().filter(rows=(10, 1))
+        self.assertEqual(query.count(), 3)
+        self.assertEqual(self.query().filter(rows__in=[(10, 1), (30, 2)]).count(), 6)
+
+    def test_tuple_ordering(self) -> None:
+        query = self.query().order_by("rows", "pk")
+        self.assertEqual(
+            list(query.values_list("rows__amount", flat=True)),
+            [10] * 3 + [20] * 3 + [30] * 3,
+        )
+
+    def test_replacing_materialised_source_preserves_frozen_references(self) -> None:
+        query = (
+            self.query()
+            .filter(rows__amount=10)
+            .alias(
+                rows=Child.objects.filter(amount=30).values("amount", "sequence"),
+            )
+        )
+        self.assertEqual(list(query.values_list("rows__amount", flat=True)), [30] * 3)
+
+    def test_dropping_projection_does_not_retain_join(self) -> None:
+        query = self.query().values("rows__amount").values("pk")
+        self.assertEqual(query.count(), 3)
+
+    def test_nested_exists_relabels_source(self) -> None:
+        inner = self.query().filter(pk=OuterRef("pk"), rows__amount=30)
+        self.assertEqual(Parent.objects.filter(Exists(inner)).count(), 3)
