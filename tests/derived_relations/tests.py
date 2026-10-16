@@ -24,11 +24,12 @@ from django.db.models.functions import Cast
 from django.db.models.lookups import GreaterThan
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.query import Query
-from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
+from django.test import SimpleTestCase, skipUnlessDBFeature
 
 import django_derived_relation
 from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
 
+from .base import DerivedRelationTestCase
 from .models import Child, CompositeChild, InheritedChild, Parent
 
 
@@ -40,22 +41,6 @@ class PostgreSQLSourceQuery(Query):
         query.add_q(Q(amount__gte=30))
         sql, params = query.as_sql(compiler, connection)
         return sql, tuple(params)
-
-
-class DerivedRelationTestCase(TestCase):
-    @classmethod
-    def setUpTestData(cls) -> None:
-        cls.empty = Parent.objects.create(name="empty")
-        cls.one = Parent.objects.create(name="one")
-        cls.many = Parent.objects.create(name="many")
-        Child.objects.create(parent=cls.one, amount=10, sequence=1)
-        Child.objects.create(parent=cls.many, amount=20, sequence=1)
-        Child.objects.create(parent=cls.many, amount=30, sequence=2)
-
-    def source(self) -> QuerySet[Child]:
-        return Child.objects.filter(parent_id=OuterRef("pk")).values(
-            "amount", "sequence"
-        )
 
 
 @skipUnless(

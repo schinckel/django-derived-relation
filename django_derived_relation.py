@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
 from django.db.models import Model, QuerySet, expressions
-from django.db.models.expressions import Col, RawSQL
+from django.db.models.expressions import Col, Expression, RawSQL, Subquery
 from django.db.models.query_utils import Q, refs_expression
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import INNER, LOUTER
@@ -123,6 +123,7 @@ class DerivedJoin(BaseTable):
         join_type: str,
         lateral: bool,
         source_db: str | None = None,
+        inferred: bool = False,
     ) -> None:
         super().__init__(name, alias)
         self.parent_alias = parent_alias
@@ -132,6 +133,7 @@ class DerivedJoin(BaseTable):
         self.lateral = lateral
         self.nullable = join_type == LOUTER
         self.source_db = source_db
+        self.inferred = inferred
 
     def as_sql(
         self, compiler: SQLCompiler, connection: BaseDatabaseWrapper
@@ -186,6 +188,12 @@ class DerivedJoin(BaseTable):
             except EmptyResultSet:
                 on_sql = "1=0"
         lateral = " LATERAL" if self.lateral else ""
+        if self.inferred and self.join_type == INNER and self.condition is None:
+            return (
+                f"CROSS JOIN{lateral} {sql} "
+                f"{compiler.connection.ops.quote_name(self.table_alias)}",
+                tuple(params),
+            )
         return (
             f"{self.join_type}{lateral} {sql} "
             f"{compiler.connection.ops.quote_name(self.table_alias)} ON ({on_sql})",
@@ -202,10 +210,16 @@ class DerivedJoin(BaseTable):
         return clone
 
     def promote(self) -> DerivedJoin:
-        return self
+        clone = copy(self)
+        if self.inferred:
+            clone.join_type = LOUTER
+        return clone
 
     def demote(self) -> DerivedJoin:
-        return self
+        clone = copy(self)
+        if self.inferred:
+            clone.join_type = INNER
+        return clone
 
     @property
     def identity(self) -> tuple[object, ...]:
@@ -233,6 +247,129 @@ class DerivedJoin(BaseTable):
         if clone.condition is not None:
             clone.condition.resolve_expression(query, *args, **kwargs)
         return clone
+
+
+class CompositeField(models.Field):
+    """Named output metadata for a table expression, never a model field."""
+
+    is_composite = True
+
+    def __init__(self, *fields: Field, **named_fields: Field) -> None:
+        if fields and named_fields:
+            raise TypeError("Use positional named fields or keyword fields, not both.")
+        self.fields = tuple(copy(field) for field in fields or named_fields.values())
+        if named_fields:
+            for name, field in zip(named_fields, self.fields, strict=True):
+                field.set_attributes_from_name(name)
+        names = [field.name for field in self.fields]
+        if len(names) < 2 or any(not name for name in names):
+            raise ValueError("CompositeField requires at least two named fields.")
+        if len(set(names)) != len(names):
+            raise ValueError("CompositeField output names must be unique.")
+        if any(isinstance(field, CompositeField) for field in self.fields):
+            raise ValueError("Nested CompositeField outputs are not supported.")
+        super().__init__()
+
+    def contribute_to_class(
+        self, cls: type[Model], name: str, private_only: bool = False
+    ) -> None:
+        raise TypeError(
+            "CompositeField describes expression output, not a model field."
+        )
+
+
+class Join:
+    """Explicit table-source interpretation and join controls."""
+
+    def __init__(
+        self,
+        source: QuerySet | BaseExpression,
+        *,
+        join_type: str,
+        condition: Q | BaseExpression | None = None,
+    ) -> None:
+        if join_type not in {"left", "inner"}:
+            raise ValueError("Join join_type must be 'left' or 'inner'.")
+        if condition is not None and not (
+            isinstance(condition, Q) or getattr(condition, "conditional", False)
+        ):
+            raise TypeError("Join condition must be Q or a boolean expression.")
+        self.source = source
+        self.join_type = LOUTER if join_type == "left" else INNER
+        self.condition = condition
+
+    def resolve_expression(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("Join must be registered with alias().")
+
+
+class TableSource(Expression):
+    """Lazy resolved source shared by bare querysets and explicit joins."""
+
+    contains_aggregate = False
+    contains_over_clause = False
+
+    def __init__(
+        self,
+        source: Query,
+        *,
+        join_type: str | None = None,
+        condition: Q | BaseExpression | None = None,
+        source_db: str | None = None,
+    ) -> None:
+        self.source = source
+        self.join_type = join_type
+        self.condition = condition
+        self.source_db = source_db
+        self.projection = _projected_expressions(source)
+        fields = []
+        for name, expression in self.projection.items():
+            field = copy(expression.output_field)
+            field.set_attributes_from_name(name)
+            fields.append(field)
+        output = CompositeField(*fields) if len(fields) > 1 else fields[0]
+        super().__init__(output_field=output)
+
+    def get_source_expressions(self) -> list[BaseExpression]:
+        return [self.source]
+
+    def set_source_expressions(self, expressions: list[BaseExpression]) -> None:
+        self.source = expressions[0]
+
+    def as_sql(
+        self, compiler: SQLCompiler, connection: BaseDatabaseWrapper
+    ) -> tuple[str, tuple[object, ...]]:
+        raise ValueError(
+            "Select table-source columns individually, not the whole source."
+        )
+
+
+def _table_source(value: object) -> TableSource | None:
+    explicit = isinstance(value, Join)
+    original = value.source if explicit else value
+    if isinstance(original, expressions.Exists):
+        return None
+    query = original.query if isinstance(original, (QuerySet, Subquery)) else original
+    if not isinstance(query, Query):
+        if explicit:
+            raise TypeError("Join requires a queryset or a table-source expression.")
+        return None
+    projection = _projected_expressions(query)
+    if not explicit and not query.default_cols and len(projection) < 2:
+        return None
+    if query.default_cols or not projection:
+        raise ValueError(
+            "Table-source querysets require an explicit values() projection."
+        )
+    if query.combinator:
+        raise NotSupportedError("Combined table-source querysets are not supported.")
+    source = query.clone()
+    source.__class__ = _query_class(type(source))
+    return TableSource(
+        source,
+        join_type=value.join_type if explicit else None,
+        condition=value.condition if explicit else None,
+        source_db=getattr(original, "_db", None),
+    )
 
 
 class DerivedRelation:
@@ -434,6 +571,37 @@ def _restore_query(base: type[Query], state: dict[str, object]) -> Query:
 
 
 class DerivedCompilerMixin:
+    def pre_sql_setup(self, *args: object, **kwargs: object) -> tuple:
+        result = super().pre_sql_setup(*args, **kwargs)
+        self._source_ordering = [expression for expression, _ in result[1]]
+        return result
+
+    def get_from_clause(self) -> tuple[list[str], list[object]]:
+        selected = [expression for expression, *_ in self.select]
+        ordering = getattr(self, "_source_ordering", [])
+        required = {col.alias for col in self.query._gen_cols(selected + ordering)}
+        required.update(getattr(self.query, "_retained_source_aliases", ()))
+        expressions = selected + ordering + [self.where, self.having, self.qualify]
+        if isinstance(self.query.group_by, tuple):
+            expressions.extend(self.query.group_by)
+        needed = {col.alias for col in self.query._gen_cols(expressions)} | required
+        pending = list(needed)
+        while pending:
+            alias = pending.pop()
+            node = self.query.alias_map.get(alias)
+            if not isinstance(node, DerivedJoin):
+                continue
+            for col in node.get_external_cols():
+                if col.alias not in needed:
+                    needed.add(col.alias)
+                    pending.append(col.alias)
+        for alias in getattr(self.query, "_source_joins", {}).values():
+            self.query.alias_refcount[alias] = int(alias in needed)
+            node = self.query.alias_map[alias]
+            if alias in required:
+                self.query.alias_map[alias] = node.demote()
+        return super().get_from_clause()
+
     def collapse_group_by(
         self, expressions: list[BaseExpression], having: list[BaseExpression]
     ) -> list[BaseExpression]:
@@ -463,6 +631,106 @@ class DerivedCompilerMixin:
 class DerivedQueryMixin:
     derived_relations: frozenset[str] = frozenset()
 
+    def clone(self) -> Query:
+        clone = super().clone()
+        clone._source_joins = getattr(self, "_source_joins", {}).copy()
+        return clone
+
+    def _selected_source_aliases(self) -> set[str]:
+        columns = self._gen_cols([*self.select, *self.annotation_select.values()])
+        return {col.alias for col in columns} & set(
+            getattr(self, "_source_joins", {}).values()
+        )
+
+    def get_aggregation(
+        self, using: str, aggregate_exprs: dict[str, BaseExpression]
+    ) -> dict[str, object]:
+        self._retained_source_aliases = self._selected_source_aliases()
+        return super().get_aggregation(using, aggregate_exprs)
+
+    def exists(self, limit: bool = True) -> Query:
+        clone = self.clone()
+        clone._retained_source_aliases = clone._selected_source_aliases()
+        return super(DerivedQueryMixin, clone).exists(limit=limit)
+
+    def add_ordering(self, *ordering: str | BaseExpression) -> None:
+        resolved: list[str | BaseExpression] = []
+        for item in ordering:
+            if isinstance(item, str) and self._source_path(item.removeprefix("-")):
+                expression = self.resolve_ref(item.removeprefix("-"))
+                item = expression.desc() if item.startswith("-") else expression.asc()
+            resolved.append(item)
+        super().add_ordering(*resolved)
+
+    def add_annotation(
+        self, annotation: BaseExpression, alias: str, select: bool = True
+    ) -> None:
+        source = _table_source(annotation)
+        if source is not None:
+            if "__" in alias or not alias:
+                raise ValueError(
+                    "Table-source aliases must be nonempty and cannot contain '__'."
+                )
+            if select:
+                raise ValueError(
+                    "Register multi-column table sources with alias(), not annotate()."
+                )
+            annotation = source
+        super().add_annotation(annotation, alias, select=select)
+
+    def _source_path(
+        self, name: str
+    ) -> tuple[str, TableSource, str | None, list[str]] | None:
+        parts = name.split("__")
+        source = self.annotations.get(parts[0])
+        if not isinstance(source, TableSource):
+            return None
+        for index in range(len(parts), 1, -1):
+            component = "__".join(parts[1:index])
+            if component in source.projection:
+                return parts[0], source, component, parts[index:]
+        return parts[0], source, None, parts[1:]
+
+    def _source_column(
+        self, name: str, source: TableSource, component: str | None
+    ) -> BaseExpression:
+        if component is None:
+            raise FieldError("Reference a projected table-source column individually.")
+        aliases = getattr(self, "_source_joins", {}).copy()
+        if name not in aliases:
+            parent = self.get_initial_alias()
+            alias, _ = self.table_alias(name, create=True)
+            node = DerivedJoin(
+                name,
+                alias,
+                parent,
+                source.source,
+                None,
+                source.join_type or LOUTER,
+                bool(source.source.get_external_cols()),
+                source.source_db,
+                inferred=source.join_type is None,
+            )
+            self.alias_map[alias] = node
+            aliases[name] = alias
+            self._source_joins = aliases
+            if source.condition is not None:
+                node.condition = _resolve_join_condition(self, source.condition)
+                self.alias_map[alias] = self.alias_map.pop(alias)
+        alias = aliases[name]
+        self.ref_alias(alias)
+        field = copy(source.projection[component].output_field)
+        field.null = True
+        return DerivedCol(alias, component, field)
+
+    def solve_lookup_type(
+        self, lookup: str, summarize: bool = False
+    ) -> tuple[list[str], list[str], BaseExpression | bool]:
+        if path := self._source_path(lookup):
+            name, source, component, lookups = path
+            return lookups, [], self._source_column(name, source, component)
+        return super().solve_lookup_type(lookup, summarize)
+
     def __reduce__(self) -> tuple[
         Callable[[type[Query], dict[str, object]], Query],
         tuple[type[Query], dict[str, object]],
@@ -480,6 +748,9 @@ class DerivedQueryMixin:
         return compiler
 
     def set_values(self, fields: tuple[str, ...]) -> None:
+        for name in fields:
+            if self._source_path(name):
+                super().add_annotation(self.resolve_ref(name), name, select=True)
         selected = set(self.annotation_select)
         selected.update(
             name
@@ -496,6 +767,16 @@ class DerivedQueryMixin:
         reuse: set[str] | None = None,
         summarize: bool = False,
     ) -> BaseExpression:
+        if path := self._source_path(name):
+            if not allow_joins:
+                raise FieldError(
+                    "Joined field references are not permitted in this query"
+                )
+            root, source, component, transforms = path
+            expression = self._source_column(root, source, component)
+            for transform in transforms:
+                expression = self.try_transform(expression, transform)
+            return expression
         root, transforms = refs_expression(name.split("__"), self.annotations)
         expression = self.annotations.get(root)
         if isinstance(expression, DerivedCol):
@@ -513,9 +794,25 @@ class DerivedQueryMixin:
         self, filter_expr: object, *args: object, **kwargs: object
     ) -> tuple[WhereNode, set[str]]:
         clause, joins = super().build_filter(filter_expr, *args, **kwargs)
+        columns = list(self._gen_cols([clause]))
+        source_aliases = set(getattr(self, "_source_joins", {}).values())
+        used_sources = {col.alias for col in columns} & source_aliases
+        if used_sources and not isinstance(filter_expr, Q):
+            condition = clause.children[0]
+            negated = kwargs.get("current_negated", False)
+            require_outer = (
+                getattr(condition, "lookup_name", None) == "isnull"
+                and condition.rhs is True
+                and not negated
+            ) or bool(negated)
+            if not require_outer:
+                joins = set(joins) | used_sources
         if isinstance(filter_expr, tuple) and kwargs.get("current_negated"):
-            root, _ = refs_expression(filter_expr[0].split("__"), self.annotations)
-            expression = self.annotations.get(root)
+            if path := self._source_path(filter_expr[0]):
+                expression = self._source_column(*path[:3])
+            else:
+                root, _ = refs_expression(filter_expr[0].split("__"), self.annotations)
+                expression = self.annotations.get(root)
             if isinstance(expression, DerivedCol):
                 condition = clause.children[0]
                 for null_condition, connector in expression.negated_null_conditions(
