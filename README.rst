@@ -1,6 +1,6 @@
-=====================================
-Standalone derived relations backport
-=====================================
+========================
+Django table expressions
+========================
 
 Use querysets and table functions as named, typed sources in another query.
 The public queryset syntax follows `accepted Django DEP 24
@@ -8,7 +8,9 @@ The public queryset syntax follows `accepted Django DEP 24
 An optional ``Join`` wrapper adds explicit LEFT/INNER joins and ON conditions.
 Correlation is inferred; there is no ``lateral=True`` switch.
 
-This API is under development and is not in the published 0.2.0 release.
+This API and project name are under development. No release has been published
+as ``django-table-expressions``; version 0.2.0 was published as
+``django-derived-relation`` with the earlier API.
 The adapter uses Django's private query/compiler APIs and requires compatibility
 tests as Django evolves. It supports Python 3.10+ with compatible Django
 versions from 4.2 onward. Python 3.11 works with Django 4.2 through 5.2.
@@ -31,11 +33,11 @@ the data and execution plan.
 Installation and managers
 =========================
 
-Install published releases from PyPI:
+After the first release under the new name, install from PyPI:
 
 .. code-block:: shell
 
-    python -m pip install django-derived-relation
+    python -m pip install django-table-expressions
 
 The outer queryset needs the opt-in adapter. Source querysets can use ordinary
 Django managers. Existing custom querysets can add ``DerivedQuerySetMixin``
@@ -43,7 +45,7 @@ before their current base:
 
 .. code-block:: python
 
-    from django_derived_relation import DerivedQuerySet, DerivedQuerySetMixin
+    from django_table_expressions import DerivedQuerySet, DerivedQuerySetMixin
 
 
     class InvoiceQuerySet(DerivedQuerySetMixin, ExistingInvoiceQuerySet):
@@ -55,7 +57,7 @@ before their current base:
 
 ``DerivedQuerySet.as_manager()`` and ``Manager.from_queryset()`` also work.
 Overrides must cooperate with ``super()``. No Django classes or global lookup
-registries are patched. Import backported types from ``django_derived_relation``.
+registries are patched. Import backported types from ``django_table_expressions``.
 
 Bare queryset sources
 =====================
@@ -96,7 +98,7 @@ Use ``Join`` when unmatched rows or an ON predicate matter:
 
 .. code-block:: python
 
-    from django_derived_relation import Join
+    from django_table_expressions import Join
 
     parents = Parent.objects.alias(
         latest=Join(latest, join_type="left"),
@@ -134,7 +136,7 @@ reports. There is no fixed invoice-to-rate foreign key:
     from django.db import models
     from django.db.models import F, OuterRef
 
-    from django_derived_relation import DerivedQuerySet, Join
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class Invoice(models.Model):
@@ -193,7 +195,7 @@ and warehouse; it is a query result, not a sales-line model instance:
     from django.db import models
     from django.db.models import F, Q, Sum
 
-    from django_derived_relation import DerivedQuerySet, Join
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class StockSnapshot(models.Model):
@@ -264,7 +266,7 @@ PostGIS, and ``django.contrib.gis.db.backends.postgis``.
     from django.contrib.gis.db.models.functions import Distance
     from django.db.models import ExpressionWrapper, F, OuterRef, Q
 
-    from django_derived_relation import DerivedQuerySet, Join
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class Address(models.Model):
@@ -356,7 +358,7 @@ also opt in. ``output_field`` describes the named, typed outputs:
 .. code-block:: python
 
     from django.db.models import Func, IntegerField, JSONField, TextField, Value
-    from django_derived_relation import CompositeField
+    from django_table_expressions import CompositeField
 
 
     class GenerateSeries(Func):
@@ -444,6 +446,11 @@ dictionary rather than a source queryset.
 Migration from DerivedRelation
 ==============================
 
+The distribution is now ``django-table-expressions`` and the import package is
+``django_table_expressions``. Replace imports from ``django_derived_relation``
+with the new package. Recreate stored queryset/query pickles after upgrading;
+the old import namespace is not included.
+
 Replace ordinary multi-column descriptors with bare querysets. Replace explicit
 LEFT/INNER and ON controls with ``Join`` and supply ``join_type``. Remove
 ``lateral=``; correlation determines that automatically. Register multi-column
@@ -464,7 +471,7 @@ Development
 
 Run ``python tests/runtests.py`` against a disposable PostgreSQL database, or
 ``python tests/runtests.py --sqlite`` for ordinary sources and SQLite functions.
-The runner creates and drops ``test_django_derived_relation``. PostgreSQL
+The runner creates and drops ``test_django_table_expressions``. PostgreSQL
 connection settings use ``PG*`` environment variables.
 
 ``tox`` tests installed wheels across compatible Python/Django versions.
@@ -488,8 +495,17 @@ tag, builds a wheel and source distribution, validates their metadata, and
 publishes through PyPI Trusted Publishing when a ``v<version>`` tag is pushed.
 Routine branch pushes only run tests.
 
-PyPI Trusted Publishing is configured for this repository’s ``release.yml``
-workflow and the GitHub ``pypi`` environment. No PyPI API token is needed.
+Before the first release under the new name, configure a PyPI pending publisher
+with these settings:
+
+* Project: ``django-table-expressions``
+* Repository owner: ``schinckel``
+* Repository: ``django-table-expressions``
+* Workflow: ``release.yml``
+* Environment: ``pypi``
+
+The previous project's publisher does not cover the renamed project and
+repository. No PyPI API token is needed.
 
 Record user-visible changes under ``Unreleased`` in ``CHANGES.rst`` as they
 are made. Before releasing, move those entries under a heading such as

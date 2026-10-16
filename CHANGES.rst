@@ -4,6 +4,9 @@ Changelog
 Unreleased
 ----------
 
+* Rename the distribution to ``django-table-expressions`` and the import package
+  to ``django_table_expressions``. Update imports from ``django_derived_relation``.
+
 * Replace ``DerivedRelation`` with DEP-style bare multi-column queryset sources
   and an optional ``Join`` wrapper for explicit LEFT/INNER joins and ON
   conditions. Sources are lazy, and correlation determines LATERAL automatically.

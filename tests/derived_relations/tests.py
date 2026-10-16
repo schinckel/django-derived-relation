@@ -26,8 +26,8 @@ from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.query import Query
 from django.test import SimpleTestCase, skipUnlessDBFeature
 
-import django_derived_relation
-from django_derived_relation import DerivedQuerySetMixin, Join
+import django_table_expressions
+from django_table_expressions import DerivedQuerySetMixin, Join
 
 from .base import DerivedRelationTestCase
 from .models import Child, CompositeChild, InheritedChild, Parent
@@ -1196,7 +1196,7 @@ class DerivedRelationValidationTests(SimpleTestCase):
 
     def test_partial_core_composite_support_does_not_disable_backport(self) -> None:
         with patch.object(models, "CompositeField", object(), create=True):
-            module = reload(django_derived_relation)
+            module = reload(django_table_expressions)
         self.assertIs(module.Join, Join)
 
     def test_empty_relation_and_projection_names_rejected(self) -> None:

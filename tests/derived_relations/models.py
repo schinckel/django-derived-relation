@@ -1,6 +1,6 @@
 from django.db import models
 
-from django_derived_relation import DerivedQuerySet
+from django_table_expressions import DerivedQuerySet
 
 
 class Parent(models.Model):

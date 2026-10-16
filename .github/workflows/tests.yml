@@ -74,7 +74,7 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: derived-tests
           MARIADB_ROOT_PASSWORD: derived-tests
-          MYSQL_DATABASE: django_derived_relation
+          MYSQL_DATABASE: django_table_expressions
         ports: ["3306:3306"]
         options: >-
           --health-cmd "${{ matrix.health }}"

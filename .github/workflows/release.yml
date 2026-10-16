@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/django-derived-relation/
+      url: https://pypi.org/project/django-table-expressions/
     permissions:
       id-token: write
     steps:

@@ -2,7 +2,7 @@ from django.db import models
 from django.test import SimpleTestCase
 from django.utils.module_loading import import_string
 
-from django_derived_relation import CompositeField
+from django_table_expressions import CompositeField
 
 
 class CompositeOutputTests(SimpleTestCase):
@@ -22,7 +22,7 @@ class CompositeOutputTests(SimpleTestCase):
         self.assertEqual(clone.fields[0].db_column, "key")
         self.assertIsNot(clone.fields[0], output.fields[0])
         _, path, args, kwargs = output.deconstruct()
-        self.assertEqual(path, "django_derived_relation.CompositeField")
+        self.assertEqual(path, "django_table_expressions.CompositeField")
         restored = import_string(path)(*args, **kwargs)
         self.assertEqual(
             [field.name for field in restored.fields], ["label", "payload"]

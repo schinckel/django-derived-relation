@@ -40,7 +40,7 @@ class CompositeField(models.Field):
     def deconstruct(self) -> tuple[str | None, str, list[object], dict[str, object]]:
         return (
             self.name,
-            "django_derived_relation.CompositeField",
+            "django_table_expressions.CompositeField",
             list(self.fields),
             {},
         )

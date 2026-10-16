@@ -3,7 +3,7 @@ from unittest import skipUnless
 from django.db import connection
 from django.db.models import F, OuterRef, Q, Sum
 
-from django_derived_relation import Join
+from django_table_expressions import Join
 
 from .base import DerivedRelationTestCase
 from .models import Child, Parent

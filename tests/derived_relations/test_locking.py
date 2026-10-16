@@ -19,7 +19,7 @@ from django.test import (
 )
 from psycopg import sql
 
-from django_derived_relation import Join
+from django_table_expressions import Join
 
 from .models import Child, Parent
 

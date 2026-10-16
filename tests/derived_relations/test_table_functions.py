@@ -5,7 +5,7 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import F, Func, Q, QuerySet, Value
 from django.db.models.sql.compiler import SQLCompiler
 
-from django_derived_relation import CompositeField, Join
+from django_table_expressions import CompositeField, Join
 
 from .base import DerivedRelationTestCase
 from .models import Parent
