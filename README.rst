@@ -1,77 +1,51 @@
-=====================================
-Standalone derived relations backport
-=====================================
+========================
+Django table expressions
+========================
 
-``DerivedRelation`` joins the result of a queryset and exposes its named,
-typed columns through ``alias__column`` lookups. Its source can group rows,
-calculate columns, or select an ordered subset before joining them to an outer
-query. With ``lateral=True``, the source can use ``OuterRef`` to refer to the
-outer row.
+Use querysets and table functions as named, typed sources in another query.
+The public queryset syntax follows `accepted Django DEP 24
+<https://github.com/django/deps/blob/main/accepted/0024-table-value-expression.rst>`_.
+An optional ``Join`` wrapper adds explicit LEFT/INNER joins and ON conditions.
+Correlation is inferred; there is no ``lateral=True`` switch.
+
+This API and project name are under development. No release has been published
+as ``django-table-expressions``; version 0.2.0 was published as
+``django-derived-relation`` with the earlier API.
+The adapter uses Django's private query/compiler APIs and requires compatibility
+tests as Django evolves. It supports Python 3.10+ with compatible Django
+versions from 4.2 onward. Python 3.11 works with Django 4.2 through 5.2.
 
 Why this is needed
 ==================
 
 Sometimes the thing you need to join is a query result: the latest exchange
 rate for each invoice, or sales totals grouped by product and warehouse.
-Django's relationship joins start from model tables. ``FilteredRelation``
-restricts which related rows match by adding an ON condition. It can even
-select the latest related row using a scalar ``Subquery`` in that condition.
-However, it cannot directly replace the joined table with a queryset that
-applies ``ORDER BY ... LIMIT``, grouping, or a custom projection.
+``FilteredRelation`` adds an ON condition to a declared model relationship.
+It can choose a particular related row using a scalar subquery in that
+condition, but it cannot replace the joined table with an ordered, sliced,
+grouped or calculated queryset result.
 
-A scalar ``Subquery`` works when you need one column. If you need several
-columns from the same selected row, you often end up repeating that subquery.
-``DerivedRelation`` lets you define the source once, join its result, and use
-its columns in the outer query. LATERAL joins allow that source to depend on
-each outer row; ordinary derived joins handle independent results.
+A scalar ``Subquery`` works for one value. To select several columns from the
+same chosen row, a derived source lets you define the query once and reference
+its columns. This is another way to express the query; performance depends on
+the data and execution plan.
 
-This gives the ORM another way to express the query. Whether it is faster
-depends on the data and execution plan.
+Installation and managers
+=========================
 
-This backport targets Django 4.2 and later releases before the core feature is
-available. Python 3.10 or later is required. Python 3.11 is
-supported with Django 4.2 through 5.2.
+After the first release under the new name, install from PyPI:
 
-Database support
-================
+.. code-block:: shell
 
-Ordinary derived joins work on PostgreSQL, SQLite, MySQL, MariaDB, and Oracle,
-using the database versions supported by your Django release. LATERAL joins
-work on PostgreSQL, Oracle, and MySQL 8.0.14 or later. SQLite and MariaDB reject
-``lateral=True`` with ``NotSupportedError``; independent sources still work.
+    python -m pip install django-table-expressions
 
-Backend restrictions and Django's field conversions still apply. In particular,
-Oracle returns an empty string for a NULL projected character field and rejects
-``select_for_update()`` inside a derived source. MySQL date literals may need
-``Cast(..., DateField())`` to return date objects, just as in an ordinary Django
-query.
-
-MySQL and Oracle sources use a ``NO_MERGE`` query hint to preserve NULL results
-from unmatched LEFT joins when the source projects constants or casts. This
-can change the execution plan and materialise the source.
-
-Oracle can order incorrectly when a LATERAL source projects an ``OuterRef`` to
-the outer ordering field and that outer field is absent from the final select
-list. Include the outer ordering field in ``values()`` or ``values_list()``,
-or order by another field. This also occurs with native Oracle SQL.
-
-Installation
-============
-
-Install from PyPI with ``python -m pip install django-derived-relation``.
-
-Import ``DerivedRelation`` and ``DerivedQuerySet`` from ``django_derived_relation``.
-
-The outer model's manager needs the derived-query adapter. Use
-``DerivedQuerySet.as_manager()`` for a new queryset. Source querysets can use
-ordinary Django managers.
-
-If you already have a custom queryset, add ``DerivedQuerySetMixin`` before its
-existing base so the adapter's methods run before delegating through ``super()``:
+The outer queryset needs the opt-in adapter. Source querysets can use ordinary
+Django managers. Existing custom querysets can add ``DerivedQuerySetMixin``
+before their current base:
 
 .. code-block:: python
 
-    from django_derived_relation import DerivedQuerySetMixin
+    from django_table_expressions import DerivedQuerySet, DerivedQuerySetMixin
 
 
     class InvoiceQuerySet(DerivedQuerySetMixin, ExistingInvoiceQuerySet):
@@ -81,62 +55,73 @@ existing base so the adapter's methods run before delegating through ``super()``
     class Invoice(models.Model):
         objects = InvoiceQuerySet.as_manager()
 
-``Manager.from_queryset(InvoiceQuerySet)`` also works. Existing queryset
-overrides must cooperate with ``super()``. ``DerivedQuerySet`` is just the
-convenience class combining the mixin with Django's ``QuerySet``.
+``DerivedQuerySet.as_manager()`` and ``Manager.from_queryset()`` also work.
+Overrides must cooperate with ``super()``. No Django classes or global lookup
+registries are patched. Import backported types from ``django_table_expressions``.
 
-The descriptor alone cannot integrate with older Django's alias registration,
-column selection, aggregation, and resolution paths. The module therefore
-includes query and compiler subclasses attached to the opt-in queryset. It
-does not monkey-patch Django classes or backend features globally. If/when you
-upgrade to a version of django that includes ``DerivedRelation``, you must
-uninstall this package and use the django supplied one.
+Bare queryset sources
+=====================
 
-Registering a derived relation
-==============================
-
-Use ``alias()`` when registering the join on its own. ``annotate()`` also
-accepts ``DerivedRelation``, like Django's ``FilteredRelation``, and lets you
-select ordinary expressions alongside it:
+Register a multi-column source with ``alias()`` and select its components:
 
 .. code-block:: python
 
-    source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
-    parents = Parent.objects.annotate(
-        rows=DerivedRelation(source, lateral=True),
-        amount=F("rows__amount"),
+    latest = (
+        Child.objects.filter(parent_id=OuterRef("pk"))
+        .order_by("-sequence", "-pk")
+        .values("amount", "sequence")[:1]
+    )
+    parents = Parent.objects.alias(latest=latest).values(
+        "pk", "latest__amount", "latest__sequence",
     )
 
-Each instance has an ``amount`` attribute. The descriptor does not create a
-``rows`` attribute or hydrate a related model instance. Registering the join
-alone retains its effect on row counts through either method; ordinary
-``alias()`` expressions remain unselected and ordinary ``annotate()``
-expressions are selected.
+This correlated source uses LATERAL. Selecting its columns makes it required:
+parents without a matching child produce no row. A bare multi-column source
+requires an explicit projection. Bare single-column querysets and scalar
+``Subquery`` expressions retain their existing scalar behaviour.
 
-Choosing between FilteredRelation and DerivedRelation
-=====================================================
+Sources are lazy. Merely registering ``alias(latest=latest)`` does not change
+``count()`` or multiply rows. Filters, selection and other references bring the
+source into the query. Repeated references reuse its join. A source referenced
+only on an optional side of an OR can use LEFT OUTER; selecting its columns
+makes it required, as specified by the DEP.
 
-Use Django's ``FilteredRelation`` when you want an ON condition for a declared
-model relationship. The joined source remains the related model's table; each
-matching model row can produce a result row.
+Multi-column sources cannot be selected wholesale with ``annotate()`` or
+``values("latest")``. Select their components, or annotate individual ``F``
+references. Component lookups and transforms retain their field types.
+Complete aliases can be used in tuple comparisons and tuple ordering.
 
-Use ``DerivedRelation`` when a queryset needs to define the joined rows and
-columns. The source can use ``values()`` to select columns,
-``values(...).annotate(...)`` to group and calculate aggregates, and
-``order_by(...)[:1]`` to select its first row. ``FilteredRelation`` does not
-accept such a queryset as its joined source; it adds an ON condition to a
-model-table join. Ordering and slicing the outer queryset sort and limit the
-complete result, not the related rows separately for every outer row.
+Explicit joins
+==============
 
-Some results can be obtained either way. For example, a scalar ``Subquery``
-in a ``FilteredRelation`` condition can choose the newest child's primary key,
-and the relationship join can retrieve that child's fields. A LATERAL derived
-query expresses the ordered selection directly and can expose several columns
-from it. For a single value, a scalar ``Subquery`` may be sufficient.
+Use ``Join`` when unmatched rows or an ON predicate matter:
 
-The following examples show two other reasons to use a derived source: a match
-computed without a declared relationship, and summaries produced by grouping.
-Neither form guarantees a faster execution plan.
+.. code-block:: python
+
+    from django_table_expressions import Join
+
+    parents = Parent.objects.alias(
+        latest=Join(latest, join_type="left"),
+    ).annotate(amount=F("latest__amount"))
+
+This retains parents without children, with ``None`` for ``amount``.
+``Join(source, *, join_type="left" | "inner", condition=None)`` is a backport
+extension; these explicit controls are not specified by the accepted DEP.
+``join_type`` must be supplied. It works with querysets and opted-in functions.
+
+``condition`` is a ``Q`` tree or boolean expression compiled in ON. A condition
+inside an ordered, sliced source changes which rows reach LIMIT. An ON condition
+tests the rows already chosen by that source. A subsequent outer ``filter()``
+is a WHERE condition and can remove unmatched rows from a LEFT join.
+
+Explicit joins are lazy too. Use a column reference when the join must affect
+row counts. Independent sources are not matched by a foreign key automatically;
+without a condition, each outer row joins every source row. ``Join`` also makes
+a one-column queryset a table source. For bare
+model querysets inside ``Join``, native ``only()``/``defer()`` root-model
+selection is preserved, including implicit primary keys and selected
+annotations. Omitted columns cannot be fetched through the alias later.
+
 
 Historical rates without a declared relationship
 ================================================
@@ -151,7 +136,7 @@ reports. There is no fixed invoice-to-rate foreign key:
     from django.db import models
     from django.db.models import F, OuterRef
 
-    from django_derived_relation import DerivedQuerySet, DerivedRelation
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class Invoice(models.Model):
@@ -180,7 +165,7 @@ reports. There is no fixed invoice-to-rate foreign key:
         .values("rate", "effective_at")[:1]
     )
     invoices = Invoice.objects.alias(
-        conversion=DerivedRelation(rates, lateral=True),
+        conversion=Join(rates, join_type="left"),
     ).annotate(
         reporting_amount=F("amount") * F("conversion__rate"),
         rate_effective_at=F("conversion__effective_at"),
@@ -210,7 +195,7 @@ and warehouse; it is a query result, not a sales-line model instance:
     from django.db import models
     from django.db.models import F, Q, Sum
 
-    from django_derived_relation import DerivedQuerySet, DerivedRelation
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class StockSnapshot(models.Model):
@@ -239,13 +224,10 @@ and warehouse; it is a query result, not a sales-line model instance:
         .annotate(units=Sum("quantity"), revenue=Sum("line_total"))
     )
     snapshots = StockSnapshot.objects.filter(as_of=period_end).alias(
-        sales=DerivedRelation(
-            totals,
-            condition=Q(
+        sales=Join(totals, condition=Q(
                 sales__product_code=F("product_code"),
                 sales__warehouse_code=F("warehouse_code"),
-            ),
-        ),
+            ), join_type="left"),
     )
     report = snapshots.values(
         "product_code",
@@ -264,8 +246,7 @@ Relationships to product or warehouse models would not define the grouped
 query result either. ``FilteredRelation`` adds conditions to a model-table
 join; it cannot replace that table with this grouping and projection.
 
-This source is independent of the outer snapshot and therefore uses the default
-``lateral=False``. The ON condition matches its two projected grouping keys.
+This source is independent of the outer snapshot and therefore uses an ordinary derived join. The ON condition matches its two projected grouping keys.
 Grouping by those keys produces at most one matching source row per snapshot.
 Snapshots without sales remain present with ``None`` for the totals; use
 ``Coalesce`` if your report needs zero. Later joins can repeat those summary
@@ -285,7 +266,7 @@ PostGIS, and ``django.contrib.gis.db.backends.postgis``.
     from django.contrib.gis.db.models.functions import Distance
     from django.db.models import ExpressionWrapper, F, OuterRef, Q
 
-    from django_derived_relation import DerivedQuerySet, DerivedRelation
+    from django_table_expressions import DerivedQuerySet, Join
 
 
     class Address(models.Model):
@@ -328,7 +309,7 @@ Nearest active service centre
         .values("id", "name", "distance")[:1]
     )
     addresses = Address.objects.alias(
-        nearest=DerivedRelation(nearest, lateral=True),
+        nearest=Join(nearest, join_type="left"),
     ).annotate(
         service_centre_id=F("nearest__id"),
         service_centre_name=F("nearest__name"),
@@ -352,10 +333,7 @@ Regions covering each address
 
     regions = Region.objects.filter(active=True).values("id", "name", "boundary")
     matches = Address.objects.alias(
-        region=DerivedRelation(
-            regions,
-            condition=Q(region__boundary__covers=F("location")),
-        ),
+        region=Join(regions, condition=Q(region__boundary__covers=F("location")), join_type="left"),
     ).values("id", "region__id", "region__name")
 
 This source is independent of the address, so it uses an ordinary derived
@@ -370,107 +348,67 @@ other source operations. See GeoDjango's
 `spatial lookups <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/geoquerysets/>`_
 and `distance functions <https://docs.djangoproject.com/en/5.2/ref/contrib/gis/functions/>`_.
 
-ON conditions and result rows
-=============================
+Table functions
+===============
 
-``DerivedRelation(queryset, condition=None, join_type="left", lateral=False)``
-accepts a ``Q`` tree or boolean expression as its condition. It preserves that
-condition for both ordinary and LATERAL joins. No condition means ``ON (1=1)``.
-
-A condition can use the outer model's fields, this source's columns, or columns
-from a previously registered derived relation. Register dependencies first;
-forward and circular references are unsupported. Conditions can combine ``Q``
-objects using ``&`` and ``|``.
-
-An ON condition on a left join retains outer rows when no source row satisfies
-it. A subsequent ``filter()`` on a projected column can remove those rows. A
-filter inside an ordered, sliced source changes which rows are eligible before
-the slice; an ON condition tests the rows chosen by that source.
-
-Several matching source rows multiply each outer row. Registration retains
-the join even when none of its columns are selected, so ``count()`` and
-aggregates still reflect that multiplication. The alias does not make the join
-optional, and joined rows are not collected into a related-object list.
-
-An ordinary source with no condition joins every source row to each outer row.
-The source's model does not supply automatic joining keys. Use a condition to
-match projected keys, as in the sales-totals example.
-
-Source columns can be used in ``F`` expressions, filters, ``values()``,
-``values_list()``, ordering, and aggregates. An explicit projection is
-recommended, although bare model querysets are accepted. Registration clones
-the source without evaluating it. It does not change scalar ``Subquery``
-semantics.
-
-Bare model sources preserve Django's ``only()`` and ``defer()`` selection,
-including implicitly selected primary-key columns and selected annotations.
-For example, ``Child.objects.only("amount")`` exposes ``rows__id`` and
-``rows__amount`` when registered as ``rows``. Filters, ordering, and LATERAL
-correlation can still use fields omitted from that projection. Native call-order
-rules apply: ``only()`` replaces the selected field set, ``defer()`` adds
-exclusions, and ``defer(None)`` clears them. A subsequent ``values()`` supplies
-its own explicit projection.
-
-This selects columns from the root model; it does not hydrate deferred model
-instances or joined related objects. An omitted column such as
-``rows__sequence`` raises ``FieldError`` when referenced and cannot be lazily
-fetched through the derived alias. Foreign keys use their attnames, such as
-``parent_id``, and composite primary keys expose their individual columns on
-Django 5.2 and later.
-Use explicit ``values()`` when output names matter.
-
-Locking source rows
-===================
-
-Sources can use ``select_for_update()`` where Django and the database support
-row locking. Evaluate the outer queryset inside ``transaction.atomic()``;
-registration alone does not execute SQL or acquire locks.
+Functions explicitly opt in with ``table_source=True``. Existing
+``set_returning=True`` expressions keep their current behaviour unless they
+also opt in. ``output_field`` describes the named, typed outputs:
 
 .. code-block:: python
 
-    from django.db import transaction
+    from django.db.models import Func, IntegerField, JSONField, TextField, Value
+    from django_table_expressions import CompositeField
 
-    with transaction.atomic():
-        candidates = (
-            Child.objects.filter(parent_id=OuterRef("pk"))
-            .order_by("sequence")
-            .select_for_update(skip_locked=True)
-        )
-        rows = Parent.objects.alias(
-            locked=DerivedRelation(
-                candidates.values("id", "amount"), lateral=True
-            )
-        )
-        locked_rows = list(rows.values("pk", "locked__id", "locked__amount"))
 
-Source locks apply to the underlying source rows. They do not lock the outer
-model merely because it joins the source. Calling ``select_for_update()`` on
-the outer queryset is a separate operation, subject to Django's and
-the database's normal restrictions on locking joined tables. Oracle permits
-``FOR UPDATE`` only in a top-level SELECT, so locking derived sources raise
-its native database error. SQLite has no row-locking support.
+    class GenerateSeries(Func):
+        function = "generate_series"
+        output_field = IntegerField()
+        table_source = True
 
-A locking source routes the outer queryset through Django's write router,
-including when the lock is inside a nested derived source. Explicit outer
-``using()`` keeps its normal precedence; an explicit source database must
-still match the outer query's chosen database.
 
-Django compiles the source's ``nowait``, ``skip_locked``, ``of``, and ``no_key``
-options normally. ``nowait=True`` reports contention as a database error;
-``skip_locked=True`` omits locked source rows. A LEFT join still returns an
-outer row with NULL source columns when no source row can be locked. For
-``of=("self",)``, include at least one model field in the source's
-``values()`` projection. Django requires a selected field from each model
-named in ``of`` and validates which related field paths the query supports.
+    class JsonEach(Func):
+        function = "jsonb_each"
+        output_field = CompositeField(key=TextField(), value=JSONField())
+        table_source = True
 
-Locks last until the transaction commits or rolls back. Predicates, slicing,
-query execution, and lock options determine which rows PostgreSQL visits;
-do not assume that every candidate row is locked. Known-empty sources preserve
-LEFT join rows through an empty SQL source and still require a transaction.
-Transaction checks, unsupported-option errors, and PostgreSQL errors propagate
-normally. PostgreSQL rejects locking grouped, aggregate, distinct, and
-set-operation results; adding a locking clause does not make those shapes
-lockable. Combined sources remain unsupported by this adapter.
+
+    parents = Parent.objects.annotate(
+        series=GenerateSeries(Value(1), Value(3)),
+    ).filter(series__gt=1)
+
+These functions are PostgreSQL examples. A single-column function can be
+selected with ``annotate()``. Register multi-column functions with ``alias()``
+and select components such as ``item__key`` and ``item__value``. ``db_column``
+maps an output field name to its physical function column. ``CompositeField``
+describes expression output and cannot be installed as a model field.
+
+Function SQL and output conversions depend on the backend. In particular,
+SQLite ``json_each`` exposes numeric values as SQL numbers, whereas PostgreSQL
+``jsonb_each`` exposes JSON. Declare appropriate output types for each function.
+The suite executes PostgreSQL scalar/composite functions and SQLite numeric
+JSON outputs, including implicit correlation. It does not claim arbitrary
+function portability. Function joins on other vendors currently raise
+``NotSupportedError`` until their compilation and execution are verified.
+
+Database support
+================
+
+Queryset sources support ordinary joins on PostgreSQL, SQLite, MySQL, MariaDB
+and Oracle. Correlated queryset sources require PostgreSQL, Oracle, or MySQL
+8.0.14+. SQLite and MariaDB reject those correlated sources with
+``NotSupportedError``. SQLite's implicitly correlated table functions are a
+separate capability.
+
+MySQL and Oracle use ``NO_MERGE`` hints where necessary to preserve NULL
+extension for constant/cast projections. This can change materialisation and
+execution plans. Oracle's character NULL conversions, source-locking errors
+and native spatial/ordering restrictions still apply.
+
+Source ``select_for_update()`` retains native transaction checks and locking
+options when that source is used. Evaluate inside ``transaction.atomic()``.
+Registering an unused lazy source does not execute it or acquire its locks.
+Sources explicitly bound with ``using()`` cannot join another database.
 
 Restrictions
 ============
@@ -478,115 +416,74 @@ Restrictions
 Currently unsupported
 ---------------------
 
-These are implementation limits, not claims that the SQL is impossible.
-Listing them here does not promise future support.
+* Combined queryset sources using ``union()``, ``intersection()`` or
+  ``difference()``; their separate implementation is not included here.
+* Boolean queryset combinations using ``queryset_a | queryset_b`` or ``&``
+  when table sources are registered. Use a single queryset with ``Q`` conditions.
+* ``update()`` and ``delete()`` after resolving table-source references.
+  An unused alias alone does not prevent a normal update.
+* Forward or circular source dependencies. Register dependencies first.
+* Projecting a composite primary key as one named output. Select its individual
+  columns on Django versions with native composite primary keys.
+* General tuple-expression RHS comparisons on Django before 5.2. Literal tuple
+  comparisons and tuple membership subqueries are covered; other shapes can
+  require newer native tuple infrastructure.
 
-* Combined sources using ``union()``, ``intersection()``, or ``difference()``.
-  A union of compatible ``values()`` projections is a valid derived-table
-  shape, but the adapter does not yet support it.
-* Updating or deleting an outer queryset containing a derived relation, or
-  combining outer querysets with ``&``, ``|``, or ``^``. Use ``Q`` trees for
-  combined filter conditions.
-* Hydrating joined model instances through ``select_related()``, table-valued
-  functions, raw SQL sources, right/full joins, and replacing the root FROM
-  source.
-* Forward references to derived aliases. Register dependencies first.
+Operations that cannot have the requested meaning
+-------------------------------------------------
 
-Registration requires ``DerivedQuerySet`` or ``DerivedQuerySetMixin``.
-Sources using ``select_related()`` need an explicit values projection.
-Relation and column names must be nonempty,
-cannot contain periods or ``__``, and must not create ambiguous aliases.
-Rename traversed columns with ``values(name=F("related__field"))``. Explicit
-source and outer database aliases must match, even if two aliases happen to
-point to the same database.
+* Joining querysets bound to different databases in one SQL statement.
+* Selecting several source columns into one scalar annotation. Select component
+  columns, or explicitly encode a scalar value such as JSON instead.
+* Referring to an output that the source has not projected, or hydrating a
+  related model instance through a derived alias.
 
-Will never work
----------------
+For queryset sources, ``values()``/``values_list()`` define columns,
+``values(...).annotate(...)`` defines grouping and aggregates, and
+``order_by(...)[:n]`` chooses source rows. ``aggregate()`` returns a Python
+dictionary rather than a source queryset.
 
-These require a different query or API, rather than lifting an adapter check.
+Migration from DerivedRelation
+==============================
 
-* An ordinary, non-LATERAL source referring to another FROM item in the same
-  query. That correlation requires ``lateral=True``.
-* Circular dependencies between derived sources. LATERAL sources can depend
-  on preceding sources, not on each other recursively.
-* Joining across independent database connections in one SQL statement.
-  Tables exposed to one connection through database facilities are a different
-  case; Django cannot merge the results of two connections into this join.
-* Referencing a column the source does not project. Include it in ``values()``
-  or give the expression a projected name first.
-* Passing the result of ``aggregate()``, an evaluated list, or a dictionary
-  as the source. This API needs a queryset that can compile into SQL; use
-  ``values(...).annotate(...)`` for grouped results.
+The distribution is now ``django-table-expressions`` and the import package is
+``django_table_expressions``. Replace imports from ``django_derived_relation``
+with the new package. Recreate stored queryset/query pickles after upgrading;
+the old import namespace is not included.
 
-PostgreSQL also rejects row locking for shapes such as grouped and combined
-results. See its
-`SELECT documentation <https://www.postgresql.org/docs/current/sql-select.html>`_.
+Replace ordinary multi-column descriptors with bare querysets. Replace explicit
+LEFT/INNER and ON controls with ``Join`` and supply ``join_type``. Remove
+``lateral=``; correlation determines that automatically. Register multi-column
+sources with ``alias()``, then annotate or select their individual components.
 
-Moving to Django's core implementation
-======================================
+Unlike 0.2.0's retained joins, unused aliases no longer change row counts.
+Selecting a bare source makes it required and can remove unmatched rows; use
+``Join(..., join_type="left")`` to retain those rows. Single-column row sources
+also need an explicit ``Join`` to distinguish them from scalar subqueries.
 
-The backport raises ``ImportError`` at import time when Django exposes
-``django.db.models.DerivedRelation``, so applications must migrate to the core
-implementation. Once your installed Django provides ``DerivedRelation``,
-import it from
-``django.db.models``. For an application queryset with custom methods, change
-its base from the backport's ``DerivedQuerySet`` to Django's ``QuerySet`` and
-retain those methods and manager configuration. If you used
-``DerivedQuerySetMixin``, remove it from the bases of your custom queryset.
-An outer model using only
-``DerivedQuerySet.as_manager()`` can return to its ordinary Django manager.
-The relation definitions and ``alias__column`` references use the same public
-API.
+The adapter remains necessary for this extension even if Django starts to
+provide part of DEP 24. Presence of ``CompositeField`` alone does not establish
+that native Django supports every source or explicit join control. The old
+``models.DerivedRelation`` import guard is removed.
 
-Development and verification
-============================
+Development
+===========
 
-Install development dependencies with ``python -m pip install -e '.[test]'``.
-Run ``python tests/runtests.py`` against a local PostgreSQL server. Connection
-settings use the standard ``PGDATABASE``, ``PGUSER``, ``PGPASSWORD``, ``PGHOST``,
-and ``PGPORT`` environment variables. The database user needs permission to
-create the isolated test database. Run ordinary joins on SQLite with
-``python tests/runtests.py --sqlite``.
+Run ``python tests/runtests.py`` against a disposable PostgreSQL database, or
+``python tests/runtests.py --sqlite`` for ordinary sources and SQLite functions.
+The runner creates and drops ``test_django_table_expressions``. PostgreSQL
+connection settings use ``PG*`` environment variables.
 
-Use ``python tests/runtests.py --mysql`` for MySQL or MariaDB, with
-``MYSQL_DATABASE``, ``MYSQL_USER``, ``MYSQL_PASSWORD``, ``MYSQL_HOST``, and
-``MYSQL_PORT``. Install ``mysqlclient`` first. The user must be able to create
-and drop the isolated test database.
+``tox`` tests installed wheels across compatible Python/Django versions.
+For example, ``tox -e py311-django52`` runs PostgreSQL and SQLite. Append
+``-mysql`` or ``-oracle`` to select their service jobs. Avoid parallel tox
+environments against a shared test database.
 
-Use ``python tests/runtests.py --oracle`` with ``ORACLE_NAME`` (an Easy Connect
-name such as ``localhost:1521/FREEPDB1``), ``ORACLE_USER``, and
-``ORACLE_PASSWORD``. Install ``oracledb`` on Django 5.0 or later; Django 4.2
-requires ``cx_Oracle`` and Oracle Client libraries. The runner creates and drops
-an isolated test user in the existing USERS and TEMP tablespaces; its database
-user needs permission to do that.
+The CI matrix covers Django 4.2 through development Django, plus MySQL, MariaDB
+and Oracle jobs. Test backend behaviour through execution before extending the
+support table. No typing or cognitive-complexity analyser is currently
+configured; automated formatting/linting does not verify those properties.
 
-The regression tests cover ordinary and LATERAL joins, typed and deferred projections,
-aggregation, null semantics, nesting, cloning, serialization, and validation.
-Independent PostgreSQL connections verify source lock contention, lock options,
-and transaction release; database-free tests check write routing.
-CI runs 24 combinations: Django 4.2 and 5.0 on Python 3.10–3.12; Django 5.1 on
-Python 3.10–3.13; Django 5.2 on Python 3.10–3.14; and Django 6.0, 6.1, and
-development main on Python 3.12–3.14. The same matrix runs weekly to catch
-upstream changes. Composite-key tests run only where Django provides them.
-Each environment installs the built wheel and runs PostgreSQL and SQLite tests.
-Additional service-container jobs run MySQL 8.4, MariaDB 11.4, and Oracle on
-Django 4.2 and 6.1. Oracle 4.2 uses XE 21 and ``cx_Oracle``; Oracle 6.1 uses
-Free and ``oracledb``. Unsupported LATERAL tests are skipped on SQLite and
-MariaDB, while their ordinary joins execute against the real backend.
-
-Run the matrix locally with ``python -m pip install tox`` followed by
-``tox``. All listed Python interpreters must be installed. To run one
-combination, use ``tox -e py311-django42``. PostgreSQL connection settings are
-passed through from the ``PG*`` environment variables. Tox runs environments
-sequentially; avoid ``tox -p`` because the runner uses a shared test database.
-For another backend, append ``-mysql`` or ``-oracle`` to the environment name,
-for example ``tox -e py311-django42-mysql``. Their connection variables and
-``LD_LIBRARY_PATH`` are passed through too.
-Support is intended to continue from Django 4.2 until the feature reaches core;
-future versions require compatibility testing and may need adapter updates.
-
-This implementation originated in an experimental Django core implementation.
-It uses internal query/compiler APIs, with adapters scoped to DerivedQuerySet.
 This project is licensed by Matthew Schinckel under the BSD 3-Clause license.
 The copyright notice for code derived from Django is retained in ``LICENSE``.
 
@@ -598,8 +495,17 @@ tag, builds a wheel and source distribution, validates their metadata, and
 publishes through PyPI Trusted Publishing when a ``v<version>`` tag is pushed.
 Routine branch pushes only run tests.
 
-PyPI Trusted Publishing is configured for this repository’s ``release.yml``
-workflow and the GitHub ``pypi`` environment. No PyPI API token is needed.
+Before the first release under the new name, configure a PyPI pending publisher
+with these settings:
+
+* Project: ``django-table-expressions``
+* Repository owner: ``schinckel``
+* Repository: ``django-table-expressions``
+* Workflow: ``release.yml``
+* Environment: ``pypi``
+
+The previous project's publisher does not cover the renamed project and
+repository. No PyPI API token is needed.
 
 Record user-visible changes under ``Unreleased`` in ``CHANGES.rst`` as they
 are made. Before releasing, move those entries under a heading such as

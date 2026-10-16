@@ -4,6 +4,15 @@ Changelog
 Unreleased
 ----------
 
+* Rename the distribution to ``django-table-expressions`` and the import package
+  to ``django_table_expressions``. Update imports from ``django_derived_relation``.
+
+* Replace ``DerivedRelation`` with DEP-style bare multi-column queryset sources
+  and an optional ``Join`` wrapper for explicit LEFT/INNER joins and ON
+  conditions. Sources are lazy, and correlation determines LATERAL automatically.
+* Add typed composite outputs and opted-in table functions, with execution
+  coverage for PostgreSQL functions and SQLite numeric JSON outputs.
+
 * Support ordinary derived joins on SQLite, MySQL, MariaDB, and Oracle, and
   LATERAL joins on MySQL 8.0.14 or later and Oracle.
 * Preserve NULL results for unmatched MySQL and Oracle LEFT joins with

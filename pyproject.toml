@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "django-derived-relation"
+name = "django-table-expressions"
 version = "0.2.0"
-description = "Ordinary and lateral derived-query joins for Django"
+description = "Queryset and table-function sources for Django queries"
 readme = "README.rst"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
@@ -13,13 +13,13 @@ license-files = ["LICENSE"]
 dependencies = ["Django>=4.2"]
 
 [project.urls]
-Repository = "https://github.com/schinckel/django-derived-relation"
+Repository = "https://github.com/schinckel/django-table-expressions"
 
 [project.optional-dependencies]
 test = ["psycopg[binary]>=3.2", "black", "isort", "flake8"]
 
-[tool.setuptools]
-py-modules = ["django_derived_relation"]
+[tool.setuptools.packages.find]
+include = ["django_table_expressions"]
 
 [tool.isort]
 profile = "black"

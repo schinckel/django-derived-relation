@@ -22,12 +22,12 @@ def main() -> int:
     elif backend == "mysql":
         database = {
             "ENGINE": "django.db.backends.mysql",
-            "NAME": os.environ.get("MYSQL_DATABASE", "django_derived_relation"),
+            "NAME": os.environ.get("MYSQL_DATABASE", "django_table_expressions"),
             "USER": os.environ.get("MYSQL_USER", "root"),
             "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
             "HOST": os.environ.get("MYSQL_HOST", "localhost"),
             "PORT": os.environ.get("MYSQL_PORT", "3306"),
-            "TEST": {"NAME": "test_django_derived_relation"},
+            "TEST": {"NAME": "test_django_table_expressions"},
         }
     elif backend == "oracle":
         database = {
@@ -37,7 +37,7 @@ def main() -> int:
             "PASSWORD": os.environ.get("ORACLE_PASSWORD", ""),
             "TEST": {
                 "CREATE_DB": False,
-                "USER": "test_django_derived_relation",
+                "USER": "test_django_table_expressions",
                 "PASSWORD": "derived-tests",
                 "TBLSPACE": "USERS",
                 "TBLSPACE_TMP": "TEMP",
@@ -51,7 +51,7 @@ def main() -> int:
             "PASSWORD": os.environ.get("PGPASSWORD", ""),
             "HOST": os.environ.get("PGHOST", ""),
             "PORT": os.environ.get("PGPORT", ""),
-            "TEST": {"NAME": "test_django_derived_relation"},
+            "TEST": {"NAME": "test_django_table_expressions"},
         }
     settings.configure(
         DATABASES={"default": database},
