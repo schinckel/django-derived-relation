@@ -496,6 +496,7 @@ class TableSource(Expression):
         self.scalar_function = not isinstance(source, Query) and not isinstance(
             source.output_field, CompositeField
         )
+        self.prior_sources: frozenset[str] = frozenset()
         super().__init__()
 
     def resolve_expression(
@@ -571,6 +572,12 @@ def _table_source(value: object) -> TableSource | None:
 
 def _query_source(query: Query, explicit: bool) -> Query | None:
     """Clone and describe a projected queryset without resolving outer bindings."""
+    if (
+        not explicit
+        and not query.default_cols
+        and len(_projected_expressions(query)) < 2
+    ):
+        return None
     if query.combinator:
         raise NotSupportedError("Combined table-source querysets are not supported.")
     if explicit and query.default_cols:
@@ -593,8 +600,6 @@ def _query_source(query: Query, explicit: bool) -> Query | None:
         for expression in projection.values()
     ):
         raise ValueError("Table sources require individually named columns.")
-    if not explicit and not query.default_cols and len(projection) < 2:
-        return None
     if query.default_cols or not projection:
         raise ValueError(
             "Table-source querysets require an explicit values() projection."
@@ -733,22 +738,16 @@ class DerivedCompilerMixin:
                 "Select table-source columns individually, not the whole source."
             )
         ordering = getattr(self, "_source_ordering", [])
-        required = {col.alias for col in self.query._gen_cols(selected + ordering)}
+        distinct = getattr(self, "_source_distinct", [])
+        required = {
+            col.alias for col in self.query._gen_cols(selected + ordering + distinct)
+        }
         required.update(getattr(self.query, "_retained_source_aliases", ()))
         expressions = selected + ordering + [self.where, self.having, self.qualify]
         if isinstance(self.query.group_by, tuple):
             expressions.extend(self.query.group_by)
         needed = {col.alias for col in self.query._gen_cols(expressions)} | required
-        pending = list(needed)
-        while pending:
-            alias = pending.pop()
-            node = self.query.alias_map.get(alias)
-            if not isinstance(node, DerivedJoin):
-                continue
-            for col in node.get_external_cols():
-                if col.alias not in needed:
-                    needed.add(col.alias)
-                    pending.append(col.alias)
+        needed = self.query._source_dependencies(needed)
         for alias, candidate in self.query.alias_map.items():
             if not getattr(candidate, "lazy_source", False):
                 continue
@@ -767,11 +766,14 @@ class DerivedCompilerMixin:
 
     def get_distinct(self) -> tuple[list[str], list[tuple[object, ...]]]:
         result, params = [], []
+        self._source_distinct = []
         fields = self.query.distinct_fields
         try:
             for name in fields:
                 if self.query._source_path(name):
-                    sql, column_params = self.compile(self.query.resolve_ref(name))
+                    expression = self.query.resolve_ref(name)
+                    self._source_distinct.append(expression)
+                    sql, column_params = self.compile(expression)
                     result.append(sql)
                     params.append(column_params)
                 else:
@@ -785,6 +787,23 @@ class DerivedCompilerMixin:
 
 
 class DerivedQueryMixin:
+    _source_condition_stack: tuple[tuple[str, frozenset[str]], ...] = ()
+
+    def _source_dependencies(self, aliases: set[str]) -> set[str]:
+        """Retain transitive ON/correlation dependencies of referenced sources."""
+        needed = aliases.copy()
+        pending = list(needed)
+        while pending:
+            node = self.alias_map.get(pending.pop())
+            if not isinstance(node, DerivedJoin):
+                continue
+            dependencies = {
+                column.alias for column in node.get_external_cols()
+            } - needed
+            needed.update(dependencies)
+            pending.extend(dependencies)
+        return needed
+
     def clone(self) -> Query:
         clone = super().clone()
         clone._source_joins = getattr(self, "_source_joins", {}).copy()
@@ -850,6 +869,7 @@ class DerivedQueryMixin:
         self._source_joins = getattr(self, "_source_joins", {}).copy()
         self._source_joins.pop(alias, None)
         if source is not None:
+            source.prior_sources = frozenset(self.annotations)
             fields = self.model._meta.get_fields()
             names = {
                 name
@@ -917,6 +937,7 @@ class DerivedQueryMixin:
         return DerivedCol(alias, column, field)
 
     def _materialize_source(self, name: str, source: TableSource) -> str:
+        self._check_source_dependency(name)
         aliases = getattr(self, "_source_joins", {}).copy()
         if name not in aliases:
             parent = self.get_initial_alias()
@@ -939,11 +960,34 @@ class DerivedQueryMixin:
             aliases[name] = alias
             self._source_joins = aliases
             if source.condition is not None:
-                node.condition = _resolve_join_condition(self, source.condition)
+                node.condition = self._resolve_source_condition(
+                    name, source, source.condition
+                )
                 self.alias_map[alias] = self.alias_map.pop(alias)
         alias = aliases[name]
         self.ref_alias(alias)
         return alias
+
+    def _check_source_dependency(self, name: str) -> None:
+        if not self._source_condition_stack:
+            return
+        owner, allowed = self._source_condition_stack[-1]
+        if name == owner:
+            return
+        if any(name == ancestor for ancestor, _ in self._source_condition_stack):
+            raise ValueError("Circular table-source dependencies are unsupported.")
+        if name not in allowed:
+            raise ValueError("Forward table-source dependencies are unsupported.")
+
+    def _resolve_source_condition(
+        self, name: str, source: TableSource, condition: Q | BaseExpression
+    ) -> WhereNode:
+        previous = self._source_condition_stack
+        self._source_condition_stack = (*previous, (name, source.prior_sources))
+        try:
+            return _resolve_join_condition(self, condition)
+        finally:
+            self._source_condition_stack = previous
 
     def solve_lookup_type(
         self, lookup: str, summarize: bool = False
@@ -965,7 +1009,12 @@ class DerivedQueryMixin:
         connection: BaseDatabaseWrapper | None = None,
         elide_empty: bool = True,
     ) -> SQLCompiler:
-        compiler = super().get_compiler(using, connection, elide_empty)
+        # Compilation resolves lazy aliases and selection-dependent join types.
+        # Keep those decisions off the reusable Query and its subsequent clones.
+        query = self.clone()
+        compiler = super(DerivedQueryMixin, query).get_compiler(
+            using, connection, elide_empty
+        )
         compiler.__class__ = _compiler_class(type(compiler))
         return compiler
 
@@ -989,6 +1038,9 @@ class DerivedQueryMixin:
         reuse: set[str] | None = None,
         summarize: bool = False,
     ) -> BaseExpression:
+        root = name.split("__", 1)[0]
+        if root in self.annotations:
+            self._check_source_dependency(root)
         if path := self._source_path(name):
             if not allow_joins:
                 raise FieldError(
@@ -1041,24 +1093,25 @@ class DerivedQueryMixin:
             if not require_outer:
                 joins = set(joins) | used_sources
         if isinstance(filter_expr, tuple) and kwargs.get("current_negated"):
-            if path := self._source_path(filter_expr[0]):
-                expression = self._source_column(*path[:3])
-            else:
-                root, _ = refs_expression(filter_expr[0].split("__"), self.annotations)
-                expression = self.annotations.get(root)
-            if isinstance(expression, DerivedCol):
-                condition = clause.children[0]
-                for null_condition, connector in expression.negated_null_conditions(
-                    condition, condition.rhs, self
-                ):
-                    clause.add(null_condition, connector)
-            elif isinstance(expression, Tuple):
-                condition = clause.children[0]
-                if condition.lookup_name != "isnull" and condition.rhs is not None:
-                    clause.add(
-                        expression.get_lookup("isnull")(expression, False), "AND"
-                    )
+            self._negate_source_filter(filter_expr[0], clause)
         return clause, joins
+
+    def _negate_source_filter(self, name: str, clause: WhereNode) -> None:
+        """Keep nullable source outputs when a queryset predicate is negated."""
+        if path := self._source_path(name):
+            expression = self._source_column(*path[:3])
+        else:
+            root, _ = refs_expression(name.split("__"), self.annotations)
+            expression = self.annotations.get(root)
+        condition = clause.children[0]
+        if isinstance(expression, DerivedCol):
+            for null_condition, connector in expression.negated_null_conditions(
+                condition, condition.rhs, self
+            ):
+                clause.add(null_condition, connector)
+        elif isinstance(expression, Tuple):
+            if condition.lookup_name != "isnull" and condition.rhs is not None:
+                clause.add(expression.get_lookup("isnull")(expression, False), "AND")
 
     def resolve_expression(
         self, query: Query, *args: object, **kwargs: object

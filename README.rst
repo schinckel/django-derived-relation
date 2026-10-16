@@ -113,7 +113,9 @@ tests the rows already chosen by that source. A subsequent outer ``filter()``
 is a WHERE condition and can remove unmatched rows from a LEFT join.
 
 Explicit joins are lazy too. Use a column reference when the join must affect
-row counts. ``Join`` also makes a one-column queryset a table source. For bare
+row counts. Independent sources are not matched by a foreign key automatically;
+without a condition, each outer row joins every source row. ``Join`` also makes
+a one-column queryset a table source. For bare
 model querysets inside ``Join``, native ``only()``/``defer()`` root-model
 selection is preserved, including implicit primary keys and selected
 annotations. Omitted columns cannot be fetched through the alias later.

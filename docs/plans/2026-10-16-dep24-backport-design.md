@@ -2,7 +2,8 @@
 
 Date: 2026-10-16
 
-Status: API direction approved; implementation in progress.
+Status: Implemented on `codex/dep24-backport`; see the
+[verification record](2026-10-16-dep24-backport-verification.md).
 
 Execution update: start with Django 5.2, then assess Django 4.2 compatibility.
 The user changed this order after approving the design.

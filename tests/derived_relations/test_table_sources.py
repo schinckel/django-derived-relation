@@ -3,6 +3,7 @@ import pickle
 from django.core.exceptions import FieldError
 from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Abs
+from django.test import skipUnlessDBFeature
 
 from .base import DerivedRelationTestCase
 from .models import Child, Parent
@@ -182,3 +183,39 @@ class TableSourceTests(DerivedRelationTestCase):
         self.assertEqual(list(query), [10, 20, 30] * 3)
         restored = pickle.loads(pickle.dumps(query))
         self.assertEqual(list(restored), [10, 20, 30] * 3)
+
+    def test_compiling_selection_does_not_change_later_projection(self) -> None:
+        query = (
+            Parent.objects.alias(
+                rows=Child.objects.none().values("amount", "sequence"),
+            )
+            .filter(Q(name="empty") | Q(rows__amount=10))
+            .values("pk", "rows__amount")
+        )
+        self.assertEqual(list(query.values_list("pk", flat=True)), [self.empty.pk])
+        self.assertEqual(list(query), [])
+        self.assertEqual(list(query.values_list("pk", flat=True)), [self.empty.pk])
+
+    @skipUnlessDBFeature("can_distinct_on_fields")
+    def test_distinct_on_without_selection_or_ordering(self) -> None:
+        query = self.query().distinct("rows__amount")
+        self.assertEqual(len(list(query)), 3)
+        self.assertEqual(self.query().distinct("rows__amount").count(), 3)
+
+    def test_combined_scalar_sources_keep_native_behaviour(self) -> None:
+        source = Child.objects.values("amount").union(Child.objects.values("amount"))[
+            :1
+        ]
+        for expression in (source, Subquery(source)):
+            with self.subTest(wrapped=isinstance(expression, Subquery)):
+                expected = list(
+                    QuerySet(model=Parent)
+                    .annotate(chosen=expression)
+                    .values_list("chosen", flat=True)
+                )
+                actual = list(
+                    Parent.objects.annotate(chosen=expression).values_list(
+                        "chosen", flat=True
+                    )
+                )
+                self.assertEqual(actual, expected)

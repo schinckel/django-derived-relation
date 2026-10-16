@@ -10,6 +10,38 @@ from .models import Child, Parent
 
 
 class ExplicitJoinTests(DerivedRelationTestCase):
+    def test_circular_on_dependencies_are_rejected(self) -> None:
+        source = Child.objects.values("amount", "sequence")
+        with self.assertRaisesRegex(ValueError, "dependenc"):
+            query = Parent.objects.alias(
+                a=Join(source, join_type="left", condition=Q(a__amount=F("b__amount"))),
+                b=Join(source, join_type="left", condition=Q(b__amount=F("a__amount"))),
+            )
+            list(query.values("a__amount", "b__amount"))
+
+    def test_forward_on_dependency_is_rejected(self) -> None:
+        source = Child.objects.values("amount", "sequence")
+        with self.assertRaisesRegex(ValueError, "dependenc"):
+            query = Parent.objects.alias(
+                a=Join(source, join_type="left", condition=Q(a__amount=F("b__amount"))),
+                b=Join(source, join_type="left"),
+            )
+            list(query.values("a__amount"))
+
+    def test_reassignment_cannot_introduce_a_dependency_cycle(self) -> None:
+        source = Child.objects.values("amount", "sequence")
+        query = (
+            Parent.objects.alias(a=Join(source, join_type="left"))
+            .alias(
+                b=Join(source, join_type="left", condition=Q(b__amount=F("a__amount"))),
+            )
+            .alias(
+                a=Join(source, join_type="left", condition=Q(a__amount=F("b__amount")))
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "Circular"):
+            list(query.values("a__amount"))
+
     def test_explicit_bare_deferred_source(self) -> None:
         query = Parent.objects.alias(
             rows=Join(
