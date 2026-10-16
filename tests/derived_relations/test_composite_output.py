@@ -1,5 +1,6 @@
 from django.db import models
 from django.test import SimpleTestCase
+from django.utils.module_loading import import_string
 
 from django_derived_relation import CompositeField
 
@@ -20,6 +21,13 @@ class CompositeOutputTests(SimpleTestCase):
         self.assertEqual([field.name for field in clone.fields], ["label", "payload"])
         self.assertEqual(clone.fields[0].db_column, "key")
         self.assertIsNot(clone.fields[0], output.fields[0])
+        _, path, args, kwargs = output.deconstruct()
+        self.assertEqual(path, "django_derived_relation.CompositeField")
+        restored = import_string(path)(*args, **kwargs)
+        self.assertEqual(
+            [field.name for field in restored.fields], ["label", "payload"]
+        )
+        self.assertEqual(restored.fields[0].db_column, "key")
 
     def test_not_a_concrete_model_field(self) -> None:
         field = CompositeField(a=models.IntegerField(), b=models.IntegerField())

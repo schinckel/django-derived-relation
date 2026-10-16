@@ -1,7 +1,7 @@
 import pickle
-import runpy
 from datetime import date
 from decimal import Decimal
+from importlib import reload
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -1196,8 +1196,8 @@ class DerivedRelationValidationTests(SimpleTestCase):
 
     def test_partial_core_composite_support_does_not_disable_backport(self) -> None:
         with patch.object(models, "CompositeField", object(), create=True):
-            namespace = runpy.run_path(django_derived_relation.__file__)
-        self.assertIn("Join", namespace)
+            module = reload(django_derived_relation)
+        self.assertIs(module.Join, Join)
 
     def test_empty_relation_and_projection_names_rejected(self) -> None:
         with self.assertRaisesMessage(ValueError, "nonempty"):
