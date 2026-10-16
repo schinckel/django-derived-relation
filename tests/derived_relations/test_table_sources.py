@@ -1,3 +1,5 @@
+import pickle
+
 from django.core.exceptions import FieldError
 from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Abs
@@ -147,3 +149,36 @@ class TableSourceTests(DerivedRelationTestCase):
     def test_nested_exists_relabels_source(self) -> None:
         inner = self.query().filter(pk=OuterRef("pk"), rows__amount=30)
         self.assertEqual(Parent.objects.filter(Exists(inner)).count(), 3)
+
+    def test_tuple_comparisons_and_empty_membership(self) -> None:
+        self.assertEqual(self.query().filter(rows__gt=(10, 1)).count(), 6)
+        self.assertEqual(self.query().filter(rows__gte=(10, 1)).count(), 9)
+        self.assertEqual(self.query().filter(rows__lt=(20, 1)).count(), 3)
+        self.assertEqual(self.query().filter(rows__lte=(20, 1)).count(), 6)
+        self.assertEqual(self.query().filter(rows__in=[]).count(), 0)
+
+    def test_tuple_subquery_membership(self) -> None:
+        source = Child.objects.filter(amount=10).values("amount", "sequence")
+        self.assertEqual(self.query().filter(rows__in=source).count(), 3)
+
+    def test_whole_source_selection_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "individually"):
+            list(self.query().values("rows"))
+
+    def test_invalid_tuple_arity_gives_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            self.query().filter(rows__in=[(10,)])
+        with self.assertRaises(ValueError):
+            self.query().filter(rows=(10,))
+
+    def test_evaluated_and_unevaluated_queryset_pickle(self) -> None:
+        query = (
+            self.query()
+            .order_by("pk", "rows__amount")
+            .values_list("rows__amount", flat=True)
+        )
+        restored = pickle.loads(pickle.dumps(query))
+        self.assertEqual(list(restored), [10, 20, 30] * 3)
+        self.assertEqual(list(query), [10, 20, 30] * 3)
+        restored = pickle.loads(pickle.dumps(query))
+        self.assertEqual(list(restored), [10, 20, 30] * 3)

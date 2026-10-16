@@ -27,7 +27,7 @@ from django.db.models.sql.query import Query
 from django.test import SimpleTestCase, skipUnlessDBFeature
 
 import django_derived_relation
-from django_derived_relation import DerivedQuerySetMixin, DerivedRelation
+from django_derived_relation import DerivedQuerySetMixin, Join
 
 from .base import DerivedRelationTestCase
 from .models import Child, CompositeChild, InheritedChild, Parent
@@ -59,9 +59,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .order_by()
             .values(total=Subquery(Child.objects.filter(pk=-1).values("amount")))
         )
-        joined = Parent.objects.alias(
-            rows=DerivedRelation(source, lateral=True, join_type="inner")
-        )
+        joined = Parent.objects.alias(rows=Join(source, join_type="inner"))
         self.assertEqual(joined.exclude(rows__total=1).count(), 3)
 
     def test_mixin_preserves_custom_queryset_and_manager(self) -> None:
@@ -77,7 +75,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
         joined = manager.named("many").alias(
             floor=F("minimum"),
-            rows=DerivedRelation(source, lateral=True),
+            rows=Join(source, join_type="left"),
             chosen=F("rows__amount"),
         )
         self.assertIsInstance(joined.all(), CustomQuerySet)
@@ -89,9 +87,11 @@ class DerivedRelationTests(DerivedRelationTestCase):
             ),
             [20, 30],
         )
-        annotated = manager.annotate(
-            rows=DerivedRelation(source, lateral=True), chosen=F("rows__amount")
-        ).named("many")
+        annotated = (
+            manager.alias(rows=Join(source, join_type="left"))
+            .annotate(chosen=F("rows__amount"))
+            .named("many")
+        )
         self.assertIsInstance(annotated.all(), CustomQuerySet)
         self.assertEqual([row.chosen for row in annotated.order_by("chosen")], [20, 30])
         with self.assertRaises(NotSupportedError):
@@ -99,28 +99,24 @@ class DerivedRelationTests(DerivedRelationTestCase):
         with self.assertRaises(NotSupportedError):
             joined.delete()
 
-    def test_annotate_registration_retains_unselected_join(self) -> None:
-        joined = Parent.objects.annotate(
-            rows=DerivedRelation(self.source(), lateral=True)
-        )
-        self.assertEqual(joined.count(), 4)
-        self.assertEqual(joined.aggregate(total=Count("pk")), {"total": 4})
-        instances = list(joined.order_by("name"))
+    def test_alias_registration_is_lazy(self) -> None:
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
+        self.assertEqual(joined.count(), 3)
+        self.assertEqual(joined.aggregate(total=Count("pk")), {"total": 3})
         self.assertEqual(
-            [row.name for row in instances], ["empty", "many", "many", "one"]
+            [row.name for row in joined.order_by("name")], ["empty", "many", "one"]
         )
-        for row in instances:
-            self.assertFalse(hasattr(row, "rows"))
-            self.assertFalse(hasattr(row, "rows__amount"))
+        with self.assertRaisesRegex(ValueError, "alias.*annotate"):
+            Parent.objects.annotate(rows=Join(self.source(), join_type="left"))
 
     def test_annotate_mixed_expressions_preserve_selection_and_order(self) -> None:
         source = Child.objects.filter(
             parent_id=OuterRef("pk"), amount__gte=OuterRef("floor")
         ).values("amount")
-        annotated = Parent.objects.annotate(
-            floor=F("minimum") + Value(15),
-            rows=DerivedRelation(source, lateral=True),
-            chosen=F("rows__amount"),
+        annotated = (
+            Parent.objects.annotate(floor=F("minimum") + Value(15))
+            .alias(rows=Join(source, join_type="left"))
+            .annotate(chosen=F("rows__amount"))
         )
         self.assertEqual(
             [
@@ -136,7 +132,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
         aliased = Parent.objects.alias(
             floor=F("minimum") + Value(15),
-            rows=DerivedRelation(source, lateral=True),
+            rows=Join(source, join_type="left"),
             chosen=F("rows__amount"),
         ).annotate(chosen_value=F("chosen"))
         self.assertEqual(
@@ -154,11 +150,11 @@ class DerivedRelationTests(DerivedRelationTestCase):
         dependent = Child.objects.filter(
             parent_id=OuterRef("pk"), amount=OuterRef("newest__amount")
         ).values("sequence")
-        joined = Parent.objects.annotate(
-            newest=DerivedRelation(newest, lateral=True),
-            match=DerivedRelation(dependent, lateral=True),
-            chosen=F("newest__amount"),
-            sequence=F("match__sequence"),
+        joined = (
+            Parent.objects.alias(newest=Join(newest, join_type="left"))
+            .alias(match=Join(dependent, join_type="left"))
+            .annotate(chosen=F("newest__amount"))
+            .annotate(sequence=F("match__sequence"))
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("name", "chosen", "sequence")),
@@ -167,8 +163,8 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
     def test_left_join_retains_cardinality_without_column_references(self) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("amount")
-        parents = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
-        self.assertEqual(parents.count(), 4)
+        parents = Parent.objects.alias(rows=Join(source, join_type="left"))
+        self.assertEqual(parents.count(), 3)
         self.assertEqual(Parent.objects.count(), 3)
         self.assertEqual(
             list(
@@ -186,7 +182,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .order_by("-sequence", "-pk")
             .values("amount", "sequence")[:1]
         )
-        parents = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        parents = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertNotEqual(
             parents.query.resolve_ref("rows__amount"),
             parents.query.resolve_ref("rows__sequence"),
@@ -204,28 +200,26 @@ class DerivedRelationTests(DerivedRelationTestCase):
         source = self.source()
         parents = Parent.objects.all()
         original = source.query.clone()
-        joined = parents.alias(rows=DerivedRelation(source, lateral=True))
+        joined = parents.alias(rows=Join(source, join_type="left"))
         self.assertEqual(list(joined.query.annotation_select), [])
-        self.assertFalse(parents.query.derived_relations)
+        self.assertFalse(getattr(parents.query, "_source_joins", {}))
         self.assertEqual(source.query.alias_map, original.alias_map)
         self.assertIsNone(source._result_cache)
         self.assertFalse(hasattr(joined.first(), "rows__amount"))
 
     def test_inner_join_and_unreferenced_count(self) -> None:
-        joined = Parent.objects.alias(
-            rows=DerivedRelation(self.source(), lateral=True, join_type="inner")
-        )
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="inner"))
         self.assertEqual(joined.count(), 3)
         self.assertEqual(
             list(joined.order_by("name").values_list("name", flat=True)),
-            ["many", "many", "one"],
+            ["empty", "many", "one"],
         )
 
     def test_bare_model_source(self) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).order_by("-sequence")[
             :1
         ]
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(
             list(joined.order_by("name").values_list("rows__amount", flat=True)),
             [None, 30, 10],
@@ -239,9 +233,11 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .alias(hidden=F("sequence"))
             .order_by("-sequence")[:1]
         )
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(
-            tuple(joined.query.annotations),
+            tuple(
+                "rows__" + name for name in joined.query.annotations["rows"].projection
+            ),
             ("rows__id", "rows__amount", "rows__doubled"),
         )
         self.assertIsInstance(
@@ -268,23 +264,21 @@ class DerivedRelationTests(DerivedRelationTestCase):
             Q(rows__amount=10) & Q(name="one")
         )
         joined = Parent.objects.alias(
-            rows=DerivedRelation(self.source(), lateral=True, condition=condition)
+            rows=Join(self.source(), condition=condition, join_type="left")
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("name", "rows__amount")),
             [("empty", None), ("many", 30), ("one", 10)],
         )
-        filtered = Parent.objects.alias(
-            rows=DerivedRelation(self.source(), lateral=True)
-        )
+        filtered = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         self.assertEqual(filtered.filter(condition).count(), 2)
 
     def test_boolean_on_expression(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(
+            rows=Join(
                 self.source(),
-                lateral=True,
                 condition=GreaterThan(F("rows__amount"), Value(25)),
+                join_type="left",
             )
         )
         self.assertEqual(joined.filter(rows__amount__isnull=False).count(), 1)
@@ -292,13 +286,13 @@ class DerivedRelationTests(DerivedRelationTestCase):
     def test_on_expression_can_transform_its_own_columns(self) -> None:
         source = self.source().annotate(day=Value(date(2026, 10, 13))).values("day")
         joined = Parent.objects.alias(
-            rows=DerivedRelation(
+            rows=Join(
                 source,
-                lateral=True,
                 condition=GreaterThan(F("rows__day__year"), Value(2020)),
+                join_type="left",
             )
         )
-        self.assertEqual(joined.count(), 4)
+        self.assertEqual(joined.count(), 3)
         self.assertEqual(joined.filter(rows__day__isnull=False).count(), 3)
 
     def test_parameter_order(self) -> None:
@@ -311,12 +305,11 @@ class DerivedRelationTests(DerivedRelationTestCase):
         joined = (
             Parent.objects.annotate(label=Value("select"))
             .alias(
-                rows=DerivedRelation(
-                    source, lateral=True, condition=Q(rows__amount__gt=15)
-                )
+                rows=Join(source, condition=Q(rows__amount__gt=15), join_type="left")
             )
             .filter(name="many")
         )
+        joined = joined.annotate(amount=F("rows__amount"))
         sql, params = joined.query.sql_with_params()
         self.assertEqual(params, ("select", "source", 5, 15, "many"))
         self.assertEqual(sql.count("%s"), len(params))
@@ -329,27 +322,25 @@ class DerivedRelationTests(DerivedRelationTestCase):
         ):
             for kind, count in (("left", 3), ("inner", 0)):
                 with self.subTest(kind=kind):
-                    joined = Parent.objects.alias(
-                        rows=DerivedRelation(source, lateral=True, join_type=kind)
-                    )
-                    self.assertEqual(joined.count(), count)
+                    joined = Parent.objects.alias(rows=Join(source, join_type=kind))
+                    self.assertEqual(joined.values("rows__amount").count(), count)
         for condition, count in (
             (Q(rows__amount__in=[]), 3),
             (~Q(rows__amount__in=[]), 4),
         ):
             joined = Parent.objects.alias(
-                rows=DerivedRelation(self.source(), lateral=True, condition=condition)
+                rows=Join(self.source(), condition=condition, join_type="left")
             )
-            self.assertEqual(joined.count(), count)
+            self.assertEqual(joined.values("rows__amount").count(), count)
 
     def test_filter_order_aggregate_distinct_slice_and_clone(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         self.assertEqual(joined.aggregate(total=Sum("rows__amount")), {"total": 60})
         self.assertEqual(joined.values("name").distinct().count(), 3)
         self.assertEqual(joined.order_by("rows__amount")[:2].count(), 2)
         self.assertEqual(joined.filter(rows__amount__gt=15).count(), 2)
         self.assertEqual(joined.exclude(rows__amount=20).count(), 3)
-        self.assertEqual(joined.count(), 4)
+        self.assertEqual(joined.count(), 3)
         grouped = joined.values("name").annotate(
             n=Count("rows__sequence"), total=Sum("rows__amount")
         )
@@ -363,8 +354,8 @@ class DerivedRelationTests(DerivedRelationTestCase):
         second = Child.objects.filter(amount=OuterRef("first__amount")).values(
             "sequence"
         )
-        joined = Parent.objects.alias(first=DerivedRelation(first, lateral=True)).alias(
-            second=DerivedRelation(second, lateral=True)
+        joined = Parent.objects.alias(first=Join(first, join_type="left")).alias(
+            second=Join(second, join_type="left")
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("second__sequence", flat=True)),
@@ -372,20 +363,18 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
 
     def test_correlation_does_not_mutate_preceding_queryset_columns(self) -> None:
-        original = Parent.objects.alias(
-            first=DerivedRelation(self.source(), lateral=True)
-        )
+        original = Parent.objects.alias(first=Join(self.source(), join_type="left"))
         source = Child.objects.filter(amount=OuterRef("first__amount")).values(
             "sequence"
         )
-        original.alias(second=DerivedRelation(source, lateral=True))
+        original.alias(second=Join(source, join_type="left"))
         self.assertFalse(
-            original.query.annotations["first__amount"].possibly_multivalued
+            original.query.resolve_ref("first__amount").possibly_multivalued
         )
 
     def test_nested_subquery_and_exists(self) -> None:
         joined = Parent.objects.filter(pk=OuterRef("pk")).alias(
-            rows=DerivedRelation(self.source(), lateral=True)
+            rows=Join(self.source(), join_type="left")
         )
         parents = Parent.objects.annotate(
             amount=Subquery(
@@ -400,7 +389,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
     def test_explicit_join_types_survive_or_filters(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(self.source(), lateral=True, join_type="inner")
+            rows=Join(self.source(), join_type="inner")
         ).filter(Q(name="empty") | Q(rows__amount__gt=0))
         self.assertEqual(joined.count(), 3)
 
@@ -408,20 +397,20 @@ class DerivedRelationTests(DerivedRelationTestCase):
         self,
     ) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("id", "amount")
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         grouped = joined.values("rows__id", "rows__amount").annotate(n=Count("pk"))
         self.assertEqual(len(list(grouped)), 4)
 
     @skipUnlessDBFeature("can_distinct_on_fields")
     def test_distinct_on_projected_column(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         self.assertEqual(
             len(list(joined.order_by("rows__amount").distinct("rows__amount"))), 4
         )
 
     def test_correlated_relationship_dependency(self) -> None:
         source = Parent.objects.filter(name=OuterRef("parent__name")).values("minimum")
-        joined = Child.objects.alias(info=DerivedRelation(source, lateral=True))
+        joined = Child.objects.alias(info=Join(source, join_type="left"))
         self.assertEqual(
             list(joined.order_by("amount").values_list("info__minimum", flat=True)),
             [0, 0, 0],
@@ -429,10 +418,8 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
     def test_derived_alias_collision_with_base_table(self) -> None:
         alias = Parent._meta.db_table
-        joined = Parent.objects.alias(
-            **{alias: DerivedRelation(self.source(), lateral=True)}
-        )
-        self.assertEqual(joined.count(), 4)
+        joined = Parent.objects.alias(**{alias: Join(self.source(), join_type="left")})
+        self.assertEqual(joined.count(), 3)
         self.assertEqual(joined.filter(**{f"{alias}__amount__gt": 25}).count(), 1)
 
     def test_nested_outerref(self) -> None:
@@ -442,7 +429,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .values("amount")
         )
         middle = (
-            Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+            Parent.objects.alias(rows=Join(source, join_type="left"))
             .order_by("pk", "rows__amount")
             .values("rows__amount")[:1]
         )
@@ -453,50 +440,58 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
 
     def test_distinct_definitions_and_repeated_descriptor(self) -> None:
-        descriptor = DerivedRelation(self.source(), lateral=True)
+        descriptor = Join(self.source(), join_type="left")
         joined = Parent.objects.alias(a=descriptor, b=descriptor)
-        self.assertEqual(joined.count(), 6)
+        self.assertEqual(joined.count(), 3)
         joined = Parent.objects.alias(
             a=descriptor,
-            b=DerivedRelation(self.source().filter(amount__gt=25), lateral=True),
+            b=Join(self.source().filter(amount__gt=25), join_type="left"),
         )
-        self.assertEqual(joined.count(), 4)
-        self.assertEqual(joined.filter(b__amount=30).count(), 2)
+        self.assertEqual(joined.count(), 3)
+        filtered = joined.filter(b__amount=30)
+        self.assertEqual(filtered.count(), 1)
+        self.assertEqual(filtered.values("a__amount").count(), 2)
 
     def test_null_rhs_in_negated_comparison(self) -> None:
         joined = Parent.objects.alias(
-            a=DerivedRelation(self.source(), lateral=True),
-            b=DerivedRelation(self.source().filter(amount__gt=25), lateral=True),
+            a=Join(self.source(), join_type="left"),
+            b=Join(self.source().filter(amount__gt=25), join_type="left"),
         )
         self.assertEqual(joined.exclude(a__amount=F("b__amount")).count(), 3)
 
     def test_negated_in_including_none(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         self.assertEqual(joined.exclude(rows__amount__in=[20, None]).count(), 2)
 
-    def test_alias_cannot_shadow_registered_relation(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
-        with self.assertRaises(ValueError):
-            joined.alias(rows=Value(1))
+    def test_scalar_alias_can_replace_unused_source(self) -> None:
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
+        replaced = joined.alias(rows=Value(7)).annotate(chosen=F("rows"))
+        self.assertEqual(list(replaced.values_list("chosen", flat=True)), [7] * 3)
+        self.assertEqual(joined.count(), 3)
 
     def test_forward_reference_rejected(self) -> None:
         source = Child.objects.filter(amount=OuterRef("later__amount")).values("amount")
         with self.assertRaises(FieldError):
-            Parent.objects.alias(first=DerivedRelation(source, lateral=True))
+            Parent.objects.alias(first=Join(source, join_type="left"))
 
-    def test_nonlateral_correlation_in_nested_derived_source_rejected(self) -> None:
-        source = Child.objects.filter(parent_id=OuterRef(OuterRef("pk"))).values(
-            "amount"
+    def test_correlation_in_nested_source_is_inferred(self) -> None:
+        inner = Parent.objects.filter(pk=OuterRef("pk")).alias(
+            rows=Join(self.source(), join_type="left")
         )
-        middle = Parent.objects.alias(
-            rows=DerivedRelation(source, lateral=True)
-        ).values(amount=F("rows__amount"))
-        with self.assertRaisesMessage(ValueError, "require lateral=True"):
-            Parent.objects.alias(nested=DerivedRelation(middle))
+        outer = Parent.objects.alias(
+            nested=Join(inner.values(amount=F("rows__amount")), join_type="left")
+        )
+        self.assertEqual(
+            sorted(
+                outer.values_list("nested__amount", flat=True),
+                key=lambda value: value or 0,
+            ),
+            [None, 10, 20, 30],
+        )
 
     def test_mixed_alias_registration_order(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(self.source(), lateral=True),
+            rows=Join(self.source(), join_type="left"),
             amount=F("rows__amount"),
         ).annotate(selected=F("amount"))
         self.assertEqual(
@@ -512,10 +507,10 @@ class DerivedRelationTests(DerivedRelationTestCase):
         inner = (
             Parent.objects.filter(pk=OuterRef("pk"))
             .alias(
-                rows=DerivedRelation(
+                rows=Join(
                     self.source(),
-                    lateral=True,
                     condition=Q(rows__amount__gt=OuterRef("minimum")),
+                    join_type="left",
                 )
             )
             .order_by("rows__amount")
@@ -531,17 +526,17 @@ class DerivedRelationTests(DerivedRelationTestCase):
         source = Child.objects.filter(parent_id=OuterRef("pk")).values_list(
             "amount", "sequence"
         )
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(joined.aggregate(total=Sum("rows__amount")), {"total": 60})
         computed = self.source().annotate(double=F("amount") * 2).values("double")
-        joined = Parent.objects.alias(rows=DerivedRelation(computed, lateral=True))
+        joined = Parent.objects.alias(rows=Join(computed, join_type="left"))
         self.assertEqual(joined.filter(rows__double__gte=40).count(), 2)
 
     @skipUnless(connection.vendor == "postgresql", "Uses an as_postgresql() override.")
     def test_source_vendor_compiler_dispatch(self) -> None:
         source = self.source()
         source.query.__class__ = PostgreSQLSourceQuery
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(joined.count(), 3)
         self.assertEqual(joined.filter(rows__amount__isnull=False).count(), 1)
 
@@ -554,7 +549,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             )
             .values("day", "price")
         )
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(joined.filter(rows__day__year=2026).count(), 3)
         self.assertEqual(joined.filter(rows__price__gt=Decimal("1.20")).count(), 3)
         self.assertEqual(
@@ -579,7 +574,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
         self,
     ) -> None:
         source = self.source().annotate(x=Value(1), y=Value(2)).values("x", "y")[:1]
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertNotEqual(
             joined.query.resolve_ref("rows__x"), joined.query.resolve_ref("rows__y")
         )
@@ -590,10 +585,10 @@ class DerivedRelationTests(DerivedRelationTestCase):
 
     def test_pickled_query_preserves_projection_constraints(self) -> None:
         source = Child.objects.filter(parent_id=OuterRef("pk")).values("id", "amount")
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         restored = Parent.objects.all()
         restored.query = pickle.loads(pickle.dumps(joined.query))
-        self.assertEqual(restored.count(), 4)
+        self.assertEqual(restored.count(), 3)
         grouped = restored.values("rows__id", "rows__amount").annotate(n=Count("pk"))
         self.assertEqual(len(list(grouped)), 4)
 
@@ -603,7 +598,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             .annotate(parent_name=OuterRef("name"))
             .values("parent_name")
         )
-        joined = Parent.objects.alias(rows=DerivedRelation(source, lateral=True))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(
             list(joined.order_by("name").values_list("name", "rows__parent_name")),
             [
@@ -634,7 +629,7 @@ class DerivedRelationTests(DerivedRelationTestCase):
             "DERIVED_SOURCE" if connection.vendor == "oracle" else "__derived_source"
         )
         outer.query.change_aliases({outer_alias: renamed})
-        joined = outer.alias(rows=DerivedRelation(source, lateral=True))
+        joined = outer.alias(rows=Join(source, join_type="left"))
         self.assertEqual(joined.filter(rows__marker__year=2026).count(), 3)
         self.assertEqual(
             list(joined.order_by("pk").values_list("rows__marker", flat=True)),
@@ -642,62 +637,71 @@ class DerivedRelationTests(DerivedRelationTestCase):
         )
 
     def test_outer_select_related_cannot_hydrate_derived_relation(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         with self.assertRaises(FieldError):
             joined.select_related("rows").query.sql_with_params()
 
     def test_queryset_boolean_combination_rejected(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         with self.assertRaises(NotSupportedError):
             joined | joined.filter(name="one")
 
     def test_outer_values_does_not_allow_model_field_collision(self) -> None:
         with self.assertRaises(ValueError):
             Parent.objects.values("pk").alias(
-                name=DerivedRelation(self.source(), lateral=True)
+                name=Join(self.source(), join_type="left")
             )
 
     def test_explicit_source_database_mismatch_rejected(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(self.source().using("other"), lateral=True)
+            rows=Join(self.source().using("other"), join_type="left")
         )
         with self.assertRaises(ValueError):
-            joined.query.sql_with_params()
+            joined.values("rows__amount").query.sql_with_params()
 
     def test_relation_predicates_cannot_hide_required_source(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
         nested = Parent.objects.filter(pk__in=joined.values("pk"))
         self.assertEqual(nested.count(), 3)
 
     def test_select_related_source_rejected(self) -> None:
         with self.assertRaises(ValueError):
             Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.select_related("parent"))
+                rows=Join(Child.objects.select_related("parent"), join_type="left")
             )
 
     def test_unsupported_source_shapes(self) -> None:
         with self.assertRaises(NotSupportedError):
             Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.all().union(Child.objects.all()))
+                rows=Join(
+                    Child.objects.all().union(Child.objects.all()), join_type="left"
+                )
             )
 
-    def test_reject_correlated_nonlateral_source(self) -> None:
-        with self.assertRaisesMessage(ValueError, "require lateral=True"):
-            Parent.objects.alias(rows=DerivedRelation(self.source()))
+    def test_correlation_does_not_require_a_flag(self) -> None:
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
+        self.assertEqual(joined.values("rows__amount").count(), 4)
 
-    def test_reject_duplicate_registration_and_unknown_columns(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
-        with self.assertRaisesMessage(ValueError, "already in use"):
-            joined.alias(rows=DerivedRelation(self.source(), lateral=True))
+    def test_source_replacement_and_unknown_columns(self) -> None:
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
+        replaced = joined.alias(
+            rows=Join(self.source().filter(amount=10), join_type="left")
+        )
+        self.assertEqual(
+            list(replaced.order_by("name").values_list("rows__amount", flat=True)),
+            [None, None, 10],
+        )
         with self.assertRaises(FieldError):
             joined.filter(rows__unknown=1)
 
-    def test_reject_writes(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(self.source(), lateral=True))
+    def test_used_sources_reject_writes_but_unused_aliases_allow_update(self) -> None:
+        joined = Parent.objects.alias(rows=Join(self.source(), join_type="left"))
+        self.assertEqual(joined.update(minimum=1), 3)
+        used = joined.filter(rows__amount=10)
         with self.assertRaises(NotSupportedError):
-            joined.update(minimum=1)
+            used.update(minimum=2)
         with self.assertRaises(NotSupportedError):
-            joined.delete()
+            used.delete()
 
 
 @skipUnless(
@@ -710,7 +714,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             "parent_id", day=Cast(Value(date(2026, 10, 13)), models.DateField())
         )
         joined = Parent.objects.alias(
-            rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
+            rows=Join(source, condition=Q(rows__parent_id=F("pk")), join_type="left")
         )
         self.assertEqual(joined.filter(rows__day__year=2026).count(), 1)
         self.assertEqual(
@@ -721,7 +725,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
     def test_constant_projection_preserves_null_extension(self) -> None:
         source = Child.objects.filter(amount=10).values("parent_id", marker=Value(7))
         joined = Parent.objects.alias(
-            rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
+            rows=Join(source, condition=Q(rows__parent_id=F("pk")), join_type="left")
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("rows__marker", flat=True)),
@@ -744,16 +748,13 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         for kind, expected in (("left", 4), ("inner", 3)):
             with self.subTest(kind=kind):
                 joined = Parent.objects.alias(
-                    rows=DerivedRelation(
-                        source,
-                        condition=Q(rows__parent_id=F("pk")),
-                        join_type=kind,
+                    rows=Join(
+                        source, condition=Q(rows__parent_id=F("pk")), join_type=kind
                     )
                 )
-                self.assertEqual(joined.count(), expected)
-                self.assertEqual(
-                    joined.aggregate(total=Count("pk")), {"total": expected}
-                )
+                self.assertEqual(joined.count(), 3)
+                self.assertEqual(joined.values("rows__amount").count(), expected)
+                self.assertEqual(joined.aggregate(total=Count("pk")), {"total": 3})
                 self.assertIsNone(source._result_cache)
 
     def test_empty_sources_preserve_left_rows(self) -> None:
@@ -764,9 +765,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         ):
             for kind, expected in (("left", [None, None, None]), ("inner", [])):
                 with self.subTest(kind=kind, source=source.query.is_empty()):
-                    joined = Parent.objects.alias(
-                        rows=DerivedRelation(source, join_type=kind)
-                    )
+                    joined = Parent.objects.alias(rows=Join(source, join_type=kind))
                     self.assertEqual(
                         list(joined.values_list("rows__amount", flat=True)), expected
                     )
@@ -779,8 +778,10 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         ):
             with self.subTest(condition=condition):
                 joined = Parent.objects.alias(
-                    rows=DerivedRelation(
-                        source, condition=Q(rows__parent_id=F("pk")) & condition
+                    rows=Join(
+                        source,
+                        condition=Q(rows__parent_id=F("pk")) & condition,
+                        join_type="left",
                     )
                 )
                 self.assertEqual(
@@ -794,7 +795,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
 
     def test_ordered_slice_applies_to_source(self) -> None:
         source = Child.objects.order_by("-amount").values("amount", "sequence")[:1]
-        joined = Parent.objects.alias(rows=DerivedRelation(source))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(
             list(joined.order_by("name").values_list("rows__amount", "rows__sequence")),
             [(30, 2), (30, 2), (30, 2)],
@@ -803,7 +804,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
     def test_selected_annotations_and_bare_columns(self) -> None:
         source = Child.objects.filter(amount=10).annotate(doubled=F("amount") * 2)
         joined = Parent.objects.alias(
-            rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
+            rows=Join(source, condition=Q(rows__parent_id=F("pk")), join_type="left")
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("rows__amount", "rows__doubled")),
@@ -813,10 +814,12 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
     def test_nested_ordinary_sources(self) -> None:
         first = Child.objects.values("parent_id", "amount")
         source = Parent.objects.alias(
-            lines=DerivedRelation(first, condition=Q(lines__parent_id=F("pk")))
+            lines=Join(first, condition=Q(lines__parent_id=F("pk")), join_type="left")
         ).values(parent_name=F("name"), amount=F("lines__amount"))
         joined = Parent.objects.alias(
-            rows=DerivedRelation(source, condition=Q(rows__parent_name=F("name")))
+            rows=Join(
+                source, condition=Q(rows__parent_name=F("name")), join_type="left"
+            )
         )
         self.assertEqual(
             list(
@@ -834,8 +837,10 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             .values("parent_id", "amount", "mark")
         )
         joined = Parent.objects.alias(
-            rows=DerivedRelation(
-                source, condition=Q(rows__parent_id=F("pk"), rows__mark="from-source")
+            rows=Join(
+                source,
+                condition=Q(rows__parent_id=F("pk"), rows__mark="from-source"),
+                join_type="left",
             )
         )
         self.assertEqual(
@@ -851,8 +856,9 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
     def test_source_locking_uses_native_backend_compiler(self) -> None:
         source = Child.objects.values("id", "parent_id").select_for_update()
         joined = Parent.objects.alias(
-            rows=DerivedRelation(source, condition=Q(rows__parent_id=F("pk")))
+            rows=Join(source, condition=Q(rows__parent_id=F("pk")), join_type="left")
         )
+        joined = joined.values("rows__id")
         self.assertIn("FOR UPDATE", joined.query.sql_with_params()[0])
         self.assertTrue(joined._for_write)
         self.assertFalse(joined.query.select_for_update)
@@ -882,12 +888,12 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             ("inner", [("many", 30)]),
         ):
             with self.subTest(join_type=join_type):
-                relation = DerivedRelation(
+                relation = Join(
                     source,
                     join_type=join_type,
                     condition=Q(rows__parent_id=F("pk"), rows__amount__gt=20),
                 )
-                for register in (Parent.objects.alias, Parent.objects.annotate):
+                for register in (Parent.objects.alias,):
                     joined = register(rows=relation)
                     self.assertEqual(
                         list(
@@ -939,7 +945,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
                     with self.assertRaises(AttributeError):
                         source.query.get_compiler(connection=connection).get_select()
                     with self.assertRaises(AttributeError):
-                        Parent.objects.alias(rows=DerivedRelation(source))
+                        Parent.objects.alias(rows=Join(source, join_type="left"))
                     continue
                 native_select = source.query.get_compiler(
                     connection=connection
@@ -951,10 +957,13 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
                     names,
                 )
                 joined = Parent.objects.filter(pk=self.one.pk).alias(
-                    rows=DerivedRelation(source, join_type="inner")
+                    rows=Join(source, join_type="inner")
                 )
                 self.assertEqual(
-                    tuple(joined.query.annotations),
+                    tuple(
+                        "rows__" + name
+                        for name in joined.query.annotations["rows"].projection
+                    ),
                     tuple(f"rows__{name}" for name in names),
                 )
                 self.assertEqual(
@@ -974,9 +983,15 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         ):
             with self.subTest(source=source):
                 joined = Parent.objects.filter(pk=self.one.pk).alias(
-                    rows=DerivedRelation(source.filter(parent=self.one))
+                    rows=Join(source.filter(parent=self.one), join_type="left")
                 )
-                self.assertEqual(tuple(joined.query.annotations), ("rows__sequence",))
+                self.assertEqual(
+                    tuple(
+                        "rows__" + name
+                        for name in joined.query.annotations["rows"].projection
+                    ),
+                    ("rows__sequence",),
+                )
                 self.assertEqual(
                     list(joined.values_list("rows__sequence", flat=True)), [1]
                 )
@@ -993,7 +1008,7 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
                 with self.assertRaises(FieldDoesNotExist):
                     source.query.get_compiler(connection=connection).get_select()
                 with self.assertRaises(FieldDoesNotExist):
-                    Parent.objects.alias(rows=DerivedRelation(source))
+                    Parent.objects.alias(rows=Join(source, join_type="left"))
 
     def test_inherited_deferred_source_preserves_parent_columns(self) -> None:
         child = InheritedChild.objects.create(
@@ -1001,10 +1016,12 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         )
         source = InheritedChild.objects.only("amount", "label").filter(pk=child.pk)
         joined = Parent.objects.filter(pk=self.one.pk).alias(
-            rows=DerivedRelation(source)
+            rows=Join(source, join_type="left")
         )
         self.assertEqual(
-            tuple(joined.query.annotations),
+            tuple(
+                "rows__" + name for name in joined.query.annotations["rows"].projection
+            ),
             ("rows__amount", "rows__child_ptr_id", "rows__label"),
         )
         self.assertEqual(
@@ -1023,10 +1040,12 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
         CompositeChild.objects.create(parent=self.one, amount=40, sequence=3)
         source = CompositeChild.objects.only("amount").filter(parent=self.one)
         joined = Parent.objects.filter(pk=self.one.pk).alias(
-            rows=DerivedRelation(source)
+            rows=Join(source, join_type="left")
         )
         self.assertEqual(
-            tuple(joined.query.annotations),
+            tuple(
+                "rows__" + name for name in joined.query.annotations["rows"].projection
+            ),
             ("rows__parent_id", "rows__amount", "rows__sequence"),
         )
         self.assertEqual(
@@ -1036,12 +1055,14 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             [(self.one.pk, 40, 3)],
         )
         with self.assertRaisesMessage(ValueError, "individually named columns"):
-            Parent.objects.alias(rows=DerivedRelation(source.values("pk")))
+            Parent.objects.alias(rows=Join(source.values("pk"), join_type="left"))
 
     def test_ordinary_grouped_source(self) -> None:
         source = Child.objects.values("parent_id").annotate(total=Sum("amount"))
         joined = Parent.objects.alias(
-            totals=DerivedRelation(source, condition=Q(totals__parent_id=F("pk")))
+            totals=Join(
+                source, condition=Q(totals__parent_id=F("pk")), join_type="left"
+            )
         )
         self.assertEqual(
             list(joined.order_by("name").values_list("totals__total", flat=True)),
@@ -1056,9 +1077,9 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
             .annotate(total=Count("pk"))
             .values("total")
         )
-        left = Parent.objects.alias(rows=DerivedRelation(source))
-        inner = Parent.objects.alias(rows=DerivedRelation(source, join_type="inner"))
-        self.assertEqual(inner.count(), 0)
+        left = Parent.objects.alias(rows=Join(source, join_type="left"))
+        inner = Parent.objects.alias(rows=Join(source, join_type="inner"))
+        self.assertEqual(inner.values("rows__total").count(), 0)
         self.assertEqual(
             list(left.values_list("rows__total", flat=True)), [None, None, None]
         )
@@ -1066,13 +1087,15 @@ class OrdinaryDerivedRelationTests(DerivedRelationTestCase):
     def test_on_relationship_dependency(self) -> None:
         source = Parent.objects.values("name", "minimum")
         joined = Child.objects.alias(
-            info=DerivedRelation(source, condition=Q(info__name=F("parent__name")))
+            info=Join(
+                source, condition=Q(info__name=F("parent__name")), join_type="left"
+            )
         )
         self.assertEqual(joined.count(), 3)
 
     def test_null_rhs_from_ordinary_outer_join(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(Child.objects.values("amount"), join_type="inner")
+            rows=Join(Child.objects.values("amount"), join_type="inner")
         )
         self.assertEqual(joined.exclude(rows__amount=F("children__amount")).count(), 9)
 
@@ -1091,35 +1114,46 @@ class DerivedRelationValidationTests(SimpleTestCase):
                 patch.object(connection, "mysql_is_mariadb", mariadb, create=True),
             ):
                 joined = Parent.objects.alias(
-                    rows=DerivedRelation(Child.objects.values("amount"), lateral=True)
+                    rows=Join(
+                        Child.objects.filter(parent_id=OuterRef("pk")).values("amount"),
+                        join_type="left",
+                    )
                 )
                 if supported:
-                    self.assertIn(" LATERAL ", joined.query.sql_with_params()[0])
+                    self.assertIn(
+                        " LATERAL ",
+                        joined.values("rows__amount").query.sql_with_params()[0],
+                    )
                 else:
                     with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
-                        joined.query.sql_with_params()
+                        joined.values("rows__amount").query.sql_with_params()
 
     def test_backend_can_disable_derived_joins(self) -> None:
-        joined = Parent.objects.alias(rows=DerivedRelation(Child.objects.values("id")))
+        joined = Parent.objects.alias(
+            rows=Join(Child.objects.values("id"), join_type="left")
+        )
         with patch.object(
             connection.features, "supports_derived_joins", False, create=True
         ):
-            with self.assertRaisesMessage(NotSupportedError, "DerivedRelation"):
-                joined.query.sql_with_params()
+            with self.assertRaisesMessage(NotSupportedError, "derived joins"):
+                joined.values("rows__id").query.sql_with_params()
 
     def test_backend_can_disable_lateral_joins(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(Child.objects.values("id"), lateral=True)
+            rows=Join(
+                Child.objects.filter(parent_id=OuterRef("pk")).values("id"),
+                join_type="left",
+            )
         )
         with patch.object(
             connection.features, "supports_lateral_joins", False, create=True
         ):
             with self.assertRaisesMessage(NotSupportedError, "LATERAL"):
-                joined.query.sql_with_params()
+                joined.values("rows__id").query.sql_with_params()
 
     def test_annotation_only_source_does_not_export_unselected_fields(self) -> None:
         source = Child.objects.values(renamed=F("amount"))
-        joined = Parent.objects.alias(rows=DerivedRelation(source))
+        joined = Parent.objects.alias(rows=Join(source, join_type="left"))
         self.assertEqual(
             joined.query.resolve_ref("rows__renamed").output_field.get_internal_type(),
             "IntegerField",
@@ -1129,7 +1163,7 @@ class DerivedRelationValidationTests(SimpleTestCase):
                 joined.values(f"rows__{field}")
 
     def test_registration_rejects_model_field_collisions(self) -> None:
-        relation = DerivedRelation(Child.objects.values("amount"))
+        relation = Join(Child.objects.values("amount"), join_type="left")
         for queryset, names in (
             (Parent.objects.all(), ("name", "pk", "id")),
             (Parent.objects.values("pk"), ("name", "pk", "id")),
@@ -1138,24 +1172,21 @@ class DerivedRelationValidationTests(SimpleTestCase):
             for method in ("alias", "annotate"):
                 for name in names:
                     with self.subTest(model=queryset.model, method=method, name=name):
-                        with self.assertRaisesMessage(
-                            ValueError, "conflicts with a model field"
-                        ):
+                        with self.assertRaisesRegex(ValueError, "conflicts.*field"):
                             getattr(queryset, method)(**{name: relation})
 
-    def test_registration_rejects_existing_expression_names(self) -> None:
-        relation = DerivedRelation(Child.objects.values("amount"))
-        for existing_method in ("alias", "annotate"):
-            original = getattr(Parent.objects, existing_method)(rows=Value(7))
-            for method in ("alias", "annotate"):
-                with self.subTest(existing=existing_method, method=method):
-                    with self.assertRaisesMessage(ValueError, "already in use"):
-                        getattr(original, method)(rows=relation)
-                    self.assertEqual(original.query.annotations["rows"].value, 7)
-                    self.assertFalse(original.query.derived_relations)
+    def test_source_replaces_existing_expression_without_mutating_original(
+        self,
+    ) -> None:
+        original = Parent.objects.alias(rows=Value(7))
+        joined = original.alias(
+            rows=Join(Child.objects.values("amount"), join_type="left")
+        )
+        self.assertEqual(original.query.annotations["rows"].value, 7)
+        self.assertIn("rows", joined.query.annotations)
 
     def test_registration_rejects_earlier_expression_in_same_call(self) -> None:
-        relation = DerivedRelation(Child.objects.values("amount"))
+        relation = Join(Child.objects.values("amount"), join_type="left")
         for method in ("alias", "annotate"):
             with self.subTest(method=method):
                 with self.assertRaisesMessage(ValueError, "conflict with aliases"):
@@ -1163,31 +1194,29 @@ class DerivedRelationValidationTests(SimpleTestCase):
                         **{"rows__amount": Value(7), "rows": relation}
                     )
 
-    def test_import_rejected_when_django_provides_derived_relation(self) -> None:
-        with patch.object(models, "DerivedRelation", object(), create=True):
-            with self.assertRaisesMessage(
-                ImportError, "Use django.db.models.DerivedRelation"
-            ):
-                runpy.run_path(django_derived_relation.__file__)
+    def test_partial_core_composite_support_does_not_disable_backport(self) -> None:
+        with patch.object(models, "CompositeField", object(), create=True):
+            namespace = runpy.run_path(django_derived_relation.__file__)
+        self.assertIn("Join", namespace)
 
     def test_empty_relation_and_projection_names_rejected(self) -> None:
         with self.assertRaisesMessage(ValueError, "nonempty"):
             Parent.objects.alias(
-                **{"": DerivedRelation(Child.objects.values("amount"))}
+                **{"": Join(Child.objects.values("amount"), join_type="left")}
             )
         with self.assertRaisesMessage(ValueError, "nonempty"):
             Parent.objects.alias(
-                rows=DerivedRelation(Child.objects.values(**{"": F("amount")}))
+                rows=Join(Child.objects.values(**{"": F("amount")}), join_type="left")
             )
 
     def test_source_and_argument_validation(self) -> None:
         with self.assertRaises(TypeError):
-            DerivedRelation(Value(1))
+            Join(Value(1), join_type="left")
         with self.assertRaises(ValueError):
-            DerivedRelation(Child.objects.all(), join_type="right")
+            Join(Child.objects.all(), join_type="right")
         with self.assertRaises(TypeError):
-            DerivedRelation(Child.objects.all(), condition=Value(1))
-        relation = DerivedRelation(Child.objects.all())
+            Join(Child.objects.all(), condition=Value(1), join_type="left")
+        relation = Join(Child.objects.all(), join_type="left")
         with self.assertRaises(TypeError):
             Parent.objects.annotate(relation)
         with self.assertRaisesMessage(TypeError, "registered"):
@@ -1195,10 +1224,10 @@ class DerivedRelationValidationTests(SimpleTestCase):
 
     def test_unsupported_backend(self) -> None:
         joined = Parent.objects.alias(
-            rows=DerivedRelation(Child.objects.values("amount"))
+            rows=Join(Child.objects.values("amount"), join_type="left")
         )
         with (
             patch.object(connection, "vendor", "unknown"),
             self.assertRaises(NotSupportedError),
         ):
-            joined.query.sql_with_params()
+            joined.values("rows__amount").query.sql_with_params()

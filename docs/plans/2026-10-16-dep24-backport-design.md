@@ -2,7 +2,10 @@
 
 Date: 2026-10-16
 
-Status: API direction approved; implementation not started.
+Status: API direction approved; implementation in progress.
+
+Execution update: start with Django 5.2, then assess Django 4.2 compatibility.
+The user changed this order after approving the design.
 
 ## Problem
 

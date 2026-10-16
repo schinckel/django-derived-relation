@@ -61,9 +61,10 @@ jobs:
       fail-fast: false
       matrix:
         image: ["mysql:8.4", "mariadb:11.4"]
-        django: ["42", "61"]
+        django: ["42", "52", "61"]
         include:
           - {django: "42", python: "3.11"}
+          - {django: "52", python: "3.11"}
           - {django: "61", python: "3.13"}
           - {image: "mysql:8.4", health: "mysqladmin ping -h localhost -pderived-tests"}
           - {image: "mariadb:11.4", health: "mariadb-admin ping -h localhost -pderived-tests"}
@@ -108,6 +109,10 @@ jobs:
             service: XEPDB1
           - django: "61"
             python: "3.13"
+            image: gvenzl/oracle-free:23.26.3-slim-faststart
+            service: FREEPDB1
+          - django: "52"
+            python: "3.11"
             image: gvenzl/oracle-free:23.26.3-slim-faststart
             service: FREEPDB1
     services:

@@ -19,7 +19,7 @@ from django.test import (
 )
 from psycopg import sql
 
-from django_derived_relation import DerivedRelation
+from django_derived_relation import Join
 
 from .models import Child, Parent
 
@@ -37,43 +37,49 @@ class DerivedRelationLockRoutingTests(SimpleTestCase):
     def test_locking_source_uses_write_router_without_locking_outer_query(self) -> None:
         source = Child.objects.select_for_update().values("id")
         original = Parent.objects.all()
-        for method in ("alias", "annotate"):
+        for method in ("alias",):
             with self.subTest(method=method):
-                joined = getattr(original, method)(locked=DerivedRelation(source))
+                joined = getattr(original, method)(
+                    locked=Join(source, join_type="left")
+                )
                 self.assertEqual(joined.db, "primary")
                 self.assertFalse(joined.query.select_for_update)
                 self.assertEqual(original.db, "replica")
 
     def test_unlocked_source_preserves_read_routing(self) -> None:
         joined = Parent.objects.alias(
-            locked=DerivedRelation(Child.objects.values("id"))
+            locked=Join(Child.objects.values("id"), join_type="left")
         )
         self.assertEqual(joined.db, "replica")
 
     def test_nested_locking_source_uses_write_router(self) -> None:
         source = Child.objects.alias(
-            nested=DerivedRelation(Child.objects.select_for_update().values("id"))
+            nested=Join(
+                Child.objects.select_for_update().values("id"), join_type="left"
+            )
         ).values("id")
-        joined = Parent.objects.alias(locked=DerivedRelation(source))
+        joined = Parent.objects.alias(locked=Join(source, join_type="left"))
         self.assertEqual(joined.db, "primary")
         self.assertFalse(joined.query.select_for_update)
 
     def test_explicit_outer_database_keeps_native_precedence(self) -> None:
         source = Child.objects.select_for_update().values("id")
-        joined = Parent.objects.using("chosen").alias(locked=DerivedRelation(source))
+        joined = Parent.objects.using("chosen").alias(
+            locked=Join(source, join_type="left")
+        )
         self.assertEqual(joined.db, "chosen")
         self.assertEqual(joined.using("another").db, "another")
         self.assertFalse(joined.query.select_for_update)
 
     def test_explicit_source_database_does_not_choose_outer_database(self) -> None:
         source = Child.objects.using("chosen").select_for_update().values("id")
-        joined = Parent.objects.alias(locked=DerivedRelation(source))
+        joined = Parent.objects.alias(locked=Join(source, join_type="left"))
         self.assertEqual(joined.db, "primary")
         self.assertEqual(joined.using("chosen").db, "chosen")
 
     def test_outer_locking_flag_and_write_routing_are_preserved(self) -> None:
         joined = Parent.objects.select_for_update().alias(
-            locked=DerivedRelation(Child.objects.values("id"))
+            locked=Join(Child.objects.values("id"), join_type="left")
         )
         self.assertEqual(joined.db, "primary")
         self.assertTrue(joined.query.select_for_update)
@@ -161,7 +167,7 @@ class DerivedRelationLockingTests(TransactionTestCase):
         condition = None if lateral else Q(pk=F("locked__parent_id"))
         return (
             Parent.objects.filter(pk=self.parent.pk)
-            .alias(locked=DerivedRelation(source, condition=condition, lateral=lateral))
+            .alias(locked=Join(source, condition=condition, join_type="left"))
             .order_by("locked__id")
             .values_list("locked__id", flat=True)
         )
@@ -209,8 +215,8 @@ class DerivedRelationLockingTests(TransactionTestCase):
                 self._peer() as peer,
             ):
                 joined = Parent.objects.filter(pk=self.parent.pk).alias(
-                    locked=DerivedRelation(
-                        source.select_for_update(of=("self",)), lateral=True
+                    locked=Join(
+                        source.select_for_update(of=("self",)), join_type="left"
                     )
                 )
                 with transaction.atomic():

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from copy import copy
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from django.core.exceptions import EmptyResultSet, FieldError, FullResultSet
 from django.db import NotSupportedError, models
@@ -18,6 +18,11 @@ from django.db.models.sql.constants import INNER, LOUTER
 from django.db.models.sql.datastructures import BaseTable
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
+
+_SQLParams: TypeAlias = tuple[object, ...] | list[object]
+_SQLFragment: TypeAlias = tuple[str, _SQLParams]
+_SelectList: TypeAlias = list[tuple["BaseExpression", _SQLFragment, str | None]]
+_OrderList: TypeAlias = list[tuple["BaseExpression", tuple[str, _SQLParams, bool]]]
 
 try:
     from django.db.models.fields.tuple_lookups import Tuple, tuple_lookups
@@ -40,6 +45,18 @@ except ImportError:
         """Local tuple lookups using ordinary Boolean lookup expressions."""
 
         def get_prep_lookup(self) -> object:
+            if self.lookup_name == "isnull":
+                if not isinstance(self.rhs, bool):
+                    raise ValueError("Tuple isnull requires a boolean.")
+                return self.rhs
+            if not isinstance(self.rhs, (tuple, list, Tuple)):
+                raise ValueError("Tuple lookups require tuple values.")
+            rows = self.rhs if self.lookup_name == "in" else [self.rhs]
+            if any(
+                not isinstance(row, (tuple, list, Tuple)) or len(row) != len(self.lhs)
+                for row in rows
+            ):
+                raise ValueError("Tuple lookup requires one value per output column.")
             return self.rhs
 
         def _comparison(self, values: Iterable[object], operation: str) -> WhereNode:
@@ -132,14 +149,6 @@ except ImportError:
         )
     }
 
-if hasattr(models, "DerivedRelation"):
-    raise ImportError(
-        "Django already provides DerivedRelation. "
-        "Use django.db.models.DerivedRelation and replace DerivedQuerySet "
-        "with django.db.models.QuerySet."
-    )
-
-
 if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.expressions import BaseExpression
@@ -157,6 +166,10 @@ class DerivedCol(Col):
     def __init__(self, alias: str, column: str, output_field: Field) -> None:
         super().__init__(alias, output_field)
         self.column = column
+
+    @property
+    def name(self) -> str:
+        return self.column
 
     def __reduce__(
         self,
@@ -253,14 +266,14 @@ class DerivedJoin(BaseTable):
     ) -> tuple[str, tuple[object, ...]]:
         if self.source_db is not None and self.source_db != connection.alias:
             raise ValueError(
-                "DerivedRelation cannot join queries on different databases."
+                "Table sources cannot join queries on different databases."
             )
         if not getattr(
             connection.features,
             "supports_derived_joins",
             connection.vendor in {"postgresql", "sqlite", "mysql", "oracle"},
         ):
-            raise NotSupportedError("This backend does not support DerivedRelation.")
+            raise NotSupportedError("This backend does not support derived joins.")
         if self.lateral and not getattr(
             connection.features,
             "supports_lateral_joins",
@@ -357,9 +370,34 @@ class DerivedJoin(BaseTable):
     ) -> DerivedJoin:
         clone = self.relabeled_clone({})
         clone.source = clone.source.resolve_expression(query, *args, **kwargs)
+        if isinstance(clone.source, Query):
+            clone.lateral = bool(clone.source.get_external_cols())
         if clone.condition is not None:
-            clone.condition.resolve_expression(query, *args, **kwargs)
+            clone.condition = clone.condition.resolve_expression(query, *args, **kwargs)
         return clone
+
+
+class _SourceTupleIn(tuple_lookups["in"]):
+    """Accept expression tuples on Django versions that only count ColPairs."""
+
+    def get_prep_lookup(self) -> object:
+        if isinstance(self.rhs, Query):
+            if len(_projected_expressions(self.rhs)) != len(self.lhs):
+                raise ValueError("Tuple subquery must select one field per component.")
+            self.rhs.clear_ordering(clear_default=True)
+            return self.rhs
+        return super().get_prep_lookup()
+
+    def as_sql(
+        self, compiler: SQLCompiler, connection: BaseDatabaseWrapper
+    ) -> tuple[str, tuple[object, ...]]:
+        if not isinstance(self.rhs, Query):
+            return super().as_sql(compiler, connection)
+        if getattr(self.rhs, "_db", None) not in {None, connection.alias}:
+            raise ValueError("Tuple subqueries cannot use a different database.")
+        lhs, lhs_params = compiler.compile(self.lhs)
+        rhs, rhs_params = compiler.compile(self.rhs)
+        return f"{lhs} IN {rhs}", (*lhs_params, *rhs_params)
 
 
 class CompositeField(models.Field):
@@ -373,6 +411,7 @@ class CompositeField(models.Field):
         self.fields = tuple(copy(field) for field in fields or named_fields.values())
         if named_fields:
             for name, field in zip(named_fields, self.fields, strict=True):
+                field.name = name
                 field.set_attributes_from_name(name)
         names = [field.name for field in self.fields]
         if len(names) < 2 or any(not name for name in names):
@@ -392,6 +431,8 @@ class CompositeField(models.Field):
         )
 
     def get_lookup(self, lookup_name: str) -> type[Lookup] | None:
+        if lookup_name == "in":
+            return _SourceTupleIn
         return tuple_lookups.get(lookup_name) or super().get_lookup(lookup_name)
 
     def contribute_to_class(
@@ -412,6 +453,10 @@ class Join:
         join_type: str,
         condition: Q | BaseExpression | None = None,
     ) -> None:
+        if not isinstance(source, QuerySet) and not getattr(
+            source, "table_source", False
+        ):
+            raise TypeError("Join requires a queryset or a table-source expression.")
         if join_type not in {"left", "inner"}:
             raise ValueError("Join join_type must be 'left' or 'inner'.")
         if condition is not None and not (
@@ -421,6 +466,10 @@ class Join:
         self.source = source
         self.join_type = LOUTER if join_type == "left" else INNER
         self.condition = condition
+
+    @property
+    def default_alias(self) -> str:
+        raise TypeError("Join requires an explicit alias.")
 
     def resolve_expression(self, *args: object, **kwargs: object) -> None:
         raise TypeError("Join must be registered with alias().")
@@ -447,23 +496,37 @@ class TableSource(Expression):
         self.scalar_function = not isinstance(source, Query) and not isinstance(
             source.output_field, CompositeField
         )
+        super().__init__()
+
+    def resolve_expression(
+        self, query: Query, *args: object, **kwargs: object
+    ) -> TableSource:
+        clone = super().resolve_expression(query, *args, **kwargs)
+        clone._resolve_output()
+        return clone
+
+    def _resolve_output(self) -> None:
+        source = self.source
         if isinstance(source, Query):
             self.projection = _projected_expressions(source)
         else:
             output = source.output_field
-            fields = output.fields if isinstance(output, CompositeField) else [output]
+            output_fields = (
+                output.fields if isinstance(output, CompositeField) else [output]
+            )
             self.projection = {
                 field.name or "": expressions.Value(None, output_field=field)
-                for field in fields
+                for field in output_fields
             }
         fields: list[Field] = []
         for name, expression in self.projection.items():
             field = copy(expression.output_field)
             if name:
+                field.name = name
                 field.set_attributes_from_name(name)
             fields.append(field)
         output = CompositeField(*fields) if len(fields) > 1 else fields[0]
-        super().__init__(output_field=output)
+        self.output_field = output
 
     def get_source_expressions(self) -> list[BaseExpression]:
         return [self.source]
@@ -495,29 +558,54 @@ def _table_source(value: object) -> TableSource | None:
         if explicit:
             raise TypeError("Join requires a queryset or a table-source expression.")
         return None
-    projection = _projected_expressions(query)
-    if not explicit and not query.default_cols and len(projection) < 2:
+    source = _query_source(query, explicit)
+    if source is None:
         return None
-    if query.default_cols or not projection:
-        raise ValueError(
-            "Table-source querysets require an explicit values() projection."
-        )
-    if query.combinator:
-        raise NotSupportedError("Combined table-source querysets are not supported.")
-    source = query.clone()
-    source.__class__ = _query_class(type(source))
-    if not hasattr(source, "selected"):
-        # Older compilers don't alias every selected field by its values() name.
-        # Native annotations provide explicit SQL aliases, including relation paths.
-        for name, expression in projection.items():
-            Query.add_annotation(source, expression, name, select=True)
-        source.set_values(tuple(projection))
     return TableSource(
         source,
         join_type=value.join_type if explicit else None,
         condition=value.condition if explicit else None,
         source_db=getattr(original, "_db", None),
     )
+
+
+def _query_source(query: Query, explicit: bool) -> Query | None:
+    """Clone and describe a projected queryset without resolving outer bindings."""
+    if query.combinator:
+        raise NotSupportedError("Combined table-source querysets are not supported.")
+    if explicit and query.default_cols:
+        query = query.clone()
+        if query.select_related:
+            raise ValueError(
+                "Table sources using select_related() require an explicit "
+                "values() projection."
+            )
+        names = tuple(
+            col.target.attname
+            for col in SQLCompiler(query, None, None).get_default_columns(
+                query.get_select_mask()
+            )
+        )
+        query.set_values((*names, *query.annotation_select))
+    projection = _projected_expressions(query)
+    if any(
+        isinstance(expression, _composite_col_types)
+        for expression in projection.values()
+    ):
+        raise ValueError("Table sources require individually named columns.")
+    if not explicit and not query.default_cols and len(projection) < 2:
+        return None
+    if query.default_cols or not projection:
+        raise ValueError(
+            "Table-source querysets require an explicit values() projection."
+        )
+    if any(not name for name in projection):
+        raise ValueError("Table-source column names must be nonempty.")
+    source = query.clone()
+    source.__class__ = _query_class(type(source))
+    if not hasattr(source, "selected"):
+        source._table_output_names = tuple(projection)
+    return source
 
 
 class FunctionJoin(DerivedJoin):
@@ -559,150 +647,6 @@ class FunctionJoin(DerivedJoin):
             f"{self.join_type}{lateral} {sql} {alias} ON ({on_sql})",
             (*params, *on_params),
         )
-
-
-class DerivedRelation:
-    """Join a named queryset projection, optionally with left correlation."""
-
-    def __init__(
-        self,
-        queryset: QuerySet,
-        *,
-        condition: Q | BaseExpression | None = None,
-        join_type: str = "left",
-        lateral: bool = False,
-    ) -> None:
-
-        if not isinstance(queryset, QuerySet):
-            raise TypeError("DerivedRelation requires a QuerySet source.")
-        if join_type not in {"left", "inner"}:
-            raise ValueError("DerivedRelation join_type must be 'left' or 'inner'.")
-        if not isinstance(lateral, bool):
-            raise TypeError("DerivedRelation lateral must be a boolean.")
-        if condition is not None and not (
-            isinstance(condition, Q) or getattr(condition, "conditional", False)
-        ):
-            raise TypeError(
-                "DerivedRelation condition must be Q or a boolean expression."
-            )
-        self.query = queryset.query.clone()
-        self.condition = condition
-        self.join_type = INNER if join_type == "inner" else LOUTER
-        self.lateral = lateral
-        self.source_db = queryset._db
-        self.source_for_write: bool = queryset._for_write
-
-    @property
-    def default_alias(self) -> str:
-        raise TypeError("DerivedRelation requires an explicit alias.")
-
-    def resolve_expression(self, *args: object, **kwargs: object) -> None:
-        raise TypeError(
-            "DerivedRelation must be registered with alias() or annotate(); "
-            "it cannot be used as a scalar expression."
-        )
-
-    def _projection(self) -> Query:
-        source = self.query.clone()
-        source.__class__ = _query_class(type(source))
-        if source.select_related:
-            raise ValueError(
-                "DerivedRelation sources using select_related() "
-                "require an explicit values() projection."
-            )
-        if source.combinator:
-            raise NotSupportedError(
-                "Combined DerivedRelation sources are not supported."
-            )
-        if getattr(source, "selected", None) is None and source.default_cols:
-            # Match Django's root-model selection, including implicit primary
-            # key components, before set_values() clears deferred loading.
-            names = tuple(
-                col.target.attname
-                for col in SQLCompiler(source, None, None).get_default_columns(
-                    source.get_select_mask()
-                )
-            )
-            source.set_values((*names, *source.annotation_select))
-        projection = _projected_expressions(source)
-        if not projection:
-            raise ValueError("DerivedRelation requires at least one projected column.")
-        if any(not name or "__" in name or "." in name for name in projection):
-            raise ValueError(
-                "DerivedRelation column names must be nonempty and cannot "
-                "contain '__' or '.'."
-            )
-        return source
-
-    def add_to_query(self, query: Query, name: str) -> None:
-        query.check_alias(name)
-        if not name or "__" in name or "." in name:
-            raise ValueError(
-                "DerivedRelation names must be nonempty and cannot contain '__' or '.'."
-            )
-        fields = query.model._meta.get_fields()
-        model_names = {
-            name
-            for field in fields
-            for name in (field.name, getattr(field, "attname", field.name))
-        }
-        if name == "pk" or name in model_names:
-            raise ValueError(
-                f"The relation name {name!r} conflicts with a model field."
-            )
-        if (
-            name in query.derived_relations
-            or name in query.annotations
-            or name in query._filtered_relations
-        ):
-            raise ValueError(f"The relation name {name!r} is already in use.")
-        parent_alias = query.get_initial_alias()
-        source = self._projection().resolve_expression(query)
-        if not self.lateral and source.get_external_cols():
-            raise ValueError("Correlated DerivedRelation sources require lateral=True.")
-        alias, _ = query.table_alias(name, create=True)
-        columns = self._columns(source, alias, name)
-        conflicts = columns.keys() & query.annotations.keys()
-        if conflicts:
-            raise ValueError(
-                f"DerivedRelation columns conflict with aliases: {conflicts}."
-            )
-        selected_annotations = set(query.annotation_select)
-        query.annotations.update(columns)
-        query.set_annotation_mask(selected_annotations)
-        join = DerivedJoin(
-            name,
-            alias,
-            parent_alias,
-            source,
-            None,
-            self.join_type,
-            self.lateral,
-            self.source_db,
-        )
-        query.alias_map[alias] = join
-        query.derived_relations = query.derived_relations | {name}
-        if self.condition is not None:
-            join.condition = _resolve_join_condition(query, self.condition)
-        # ON needs this source's namespace during resolution, but any ordinary
-        # relationship dependencies it introduces must precede the source.
-        query.alias_map[alias] = query.alias_map.pop(alias)
-
-    def _columns(self, source: Query, alias: str, name: str) -> dict[str, DerivedCol]:
-        columns: dict[str, DerivedCol] = {}
-        for column, expression in _projected_expressions(source).items():
-            if isinstance(expression, _composite_col_types):
-                raise ValueError("DerivedRelation requires individually named columns.")
-            field = copy(expression.output_field)
-            field.null = (
-                self.join_type == LOUTER
-                or field.null
-                or not isinstance(expression, Col)
-                or expression.alias not in source.alias_map
-                or source.alias_map[expression.alias].join_type == LOUTER
-            )
-            columns[f"{name}__{column}"] = DerivedCol(alias, column, field)
-        return columns
 
 
 def _projected_expressions(source: Query) -> dict[str, BaseExpression]:
@@ -760,7 +704,21 @@ def _restore_query(base: type[Query], state: dict[str, object]) -> Query:
 
 
 class DerivedCompilerMixin:
-    def pre_sql_setup(self, *args: object, **kwargs: object) -> tuple:
+    def get_select(
+        self, *args: object, **kwargs: object
+    ) -> tuple[_SelectList, dict[str, object] | None, dict[str, int]]:
+        select, klass_info, annotation_map = super().get_select(*args, **kwargs)
+        names = getattr(self.query, "_table_output_names", None)
+        if names is not None:
+            select = [
+                (expression, sql, name)
+                for (expression, sql, _), name in zip(select, names, strict=True)
+            ]
+        return select, klass_info, annotation_map
+
+    def pre_sql_setup(
+        self, *args: object, **kwargs: object
+    ) -> tuple[_SelectList, _OrderList, list[_SQLFragment]]:
         result = super().pre_sql_setup(*args, **kwargs)
         self._source_ordering = [expression for expression, _ in result[1]]
         return result
@@ -812,7 +770,7 @@ class DerivedCompilerMixin:
         fields = self.query.distinct_fields
         try:
             for name in fields:
-                if name.split("__")[0] in self.query.derived_relations:
+                if self.query._source_path(name):
                     sql, column_params = self.compile(self.query.resolve_ref(name))
                     result.append(sql)
                     params.append(column_params)
@@ -827,12 +785,21 @@ class DerivedCompilerMixin:
 
 
 class DerivedQueryMixin:
-    derived_relations: frozenset[str] = frozenset()
-
     def clone(self) -> Query:
         clone = super().clone()
         clone._source_joins = getattr(self, "_source_joins", {}).copy()
         return clone
+
+    def change_aliases(self, change_map: dict[str, str]) -> None:
+        super().change_aliases(change_map)
+        self._source_joins = {
+            name: change_map.get(alias, alias)
+            for name, alias in getattr(self, "_source_joins", {}).items()
+        }
+        self._retained_source_aliases = {
+            change_map.get(alias, alias)
+            for alias in getattr(self, "_retained_source_aliases", ())
+        }
 
     def _selected_source_aliases(self) -> set[str]:
         columns = self._gen_cols([*self.select, *self.annotation_select.values()])
@@ -858,14 +825,21 @@ class DerivedQueryMixin:
         resolved: list[str | BaseExpression] = []
         for item in ordering:
             if isinstance(item, str) and self._source_path(item.removeprefix("-")):
-                expression = self.resolve_ref(item.removeprefix("-"))
-                if Tuple is not None and isinstance(expression, Tuple):
-                    resolved.extend(
-                        column.desc() if item.startswith("-") else column.asc()
-                        for column in expression
+                name, source, component, rest = self._source_path(
+                    item.removeprefix("-")
+                )
+                names = [item.removeprefix("-")]
+                if component is None and not source.scalar_function and not rest:
+                    names = [f"{name}__{column}" for column in source.projection]
+                resolved.extend(
+                    (
+                        expressions.F(name).desc()
+                        if item.startswith("-")
+                        else expressions.F(name).asc()
                     )
-                    continue
-                item = expression.desc() if item.startswith("-") else expression.asc()
+                    for name in names
+                )
+                continue
             resolved.append(item)
         super().add_ordering(*resolved)
 
@@ -876,6 +850,21 @@ class DerivedQueryMixin:
         self._source_joins = getattr(self, "_source_joins", {}).copy()
         self._source_joins.pop(alias, None)
         if source is not None:
+            fields = self.model._meta.get_fields()
+            names = {
+                name
+                for field in fields
+                for name in (field.name, getattr(field, "attname", field.name))
+            }
+            if alias == "pk" or alias in names:
+                raise ValueError(
+                    f"The source name {alias!r} conflicts with a model field."
+                )
+            if any(
+                name.startswith(alias + "__") and not isinstance(value, DerivedCol)
+                for name, value in self.annotations.items()
+            ):
+                raise ValueError("Table-source columns conflict with aliases.")
             if "__" in alias or not alias:
                 raise ValueError(
                     "Table-source aliases must be nonempty and cannot contain '__'."
@@ -909,7 +898,7 @@ class DerivedQueryMixin:
         if component is None:
             if source.scalar_function:
                 component = next(iter(source.projection))
-            elif Tuple is not None:
+            else:
                 return Tuple(
                     *(
                         self._source_column(name, source, column)
@@ -917,10 +906,17 @@ class DerivedQueryMixin:
                     ),
                     output_field=source.output_field,
                 )
-            else:
-                raise NotSupportedError(
-                    "Whole-source tuple operations require Django 5.2 or later."
-                )
+        alias = self._materialize_source(name, source)
+        field = copy(source.projection[component].output_field)
+        field.null = True
+        column = (
+            component
+            if isinstance(source.source, Query)
+            else field.db_column or component or alias
+        )
+        return DerivedCol(alias, column, field)
+
+    def _materialize_source(self, name: str, source: TableSource) -> str:
         aliases = getattr(self, "_source_joins", {}).copy()
         if name not in aliases:
             parent = self.get_initial_alias()
@@ -947,14 +943,7 @@ class DerivedQueryMixin:
                 self.alias_map[alias] = self.alias_map.pop(alias)
         alias = aliases[name]
         self.ref_alias(alias)
-        field = copy(source.projection[component].output_field)
-        field.null = True
-        column = (
-            component
-            if isinstance(source.source, Query)
-            else field.db_column or component or alias
-        )
-        return DerivedCol(alias, column, field)
+        return alias
 
     def solve_lookup_type(
         self, lookup: str, summarize: bool = False
@@ -1026,6 +1015,13 @@ class DerivedQueryMixin:
     def build_filter(
         self, filter_expr: object, *args: object, **kwargs: object
     ) -> tuple[WhereNode, set[str]]:
+        if isinstance(filter_expr, tuple) and isinstance(filter_expr[1], QuerySet):
+            path = self._source_path(filter_expr[0])
+            if path and path[2] is None:
+                value = filter_expr[1]
+                resolved = value.query.resolve_expression(self)
+                resolved._db = value._db
+                filter_expr = (filter_expr[0], resolved)
         clause, joins = super().build_filter(filter_expr, *args, **kwargs)
         columns = list(self._gen_cols([clause]))
         source_aliases = {
@@ -1056,6 +1052,12 @@ class DerivedQueryMixin:
                     condition, condition.rhs, self
                 ):
                     clause.add(null_condition, connector)
+            elif isinstance(expression, Tuple):
+                condition = clause.children[0]
+                if condition.lookup_name != "isnull" and condition.rhs is not None:
+                    clause.add(
+                        expression.get_lookup("isnull")(expression, False), "AND"
+                    )
         return clause, joins
 
     def resolve_expression(
@@ -1079,9 +1081,17 @@ class DerivedQueryMixin:
         return columns
 
     def combine(self, rhs: Query, connector: str) -> None:
-        if self.derived_relations or getattr(rhs, "derived_relations", ()):
+        if any(
+            getattr(node, "lazy_source", False)
+            for query in (self, rhs)
+            for node in query.alias_map.values()
+        ) or any(
+            isinstance(value, TableSource)
+            for query in (self, rhs)
+            for value in query.annotations.values()
+        ):
             raise NotSupportedError(
-                "Boolean queryset combinations with DerivedRelation are not "
+                "Boolean queryset combinations with table sources are not "
                 "supported; use Q conditions."
             )
         super().combine(rhs, connector)
@@ -1103,39 +1113,24 @@ class DerivedQuerySetMixin:
     def _annotate(
         self, args: tuple[object, ...], kwargs: dict[str, object], select: bool = True
     ) -> QuerySet:
-        clone = super()._annotate(args, {}, select)
-        names = {
-            name
-            for field in self.model._meta.get_fields()
-            for name in (field.name, getattr(field, "attname", field.name))
-        }
-        for name, value in kwargs.items():
-            if name.split("__")[0] in clone.query.derived_relations:
-                raise ValueError(f"The relation name {name!r} is already in use.")
-            if isinstance(value, DerivedRelation):
-                if name in names:
-                    raise ValueError(
-                        f"The relation name {name!r} conflicts with a model field."
-                    )
-                value.add_to_query(clone.query, name)
-                clone._for_write = clone._for_write or value.source_for_write
-            else:
-                clone = super(DerivedQuerySetMixin, clone)._annotate(
-                    (), {name: value}, select
-                )
+        clone = super()._annotate(args, kwargs, select)
+        for value in kwargs.values():
+            original = value.source if isinstance(value, Join) else value
+            if isinstance(original, QuerySet):
+                clone._for_write = clone._for_write or original._for_write
         return clone
 
     def update(self, **kwargs: object) -> int:
-        if self.query.derived_relations:
+        if getattr(self.query, "_source_joins", {}):
             raise NotSupportedError(
-                "Calling update() with DerivedRelation is not supported."
+                "Calling update() with table sources is not supported."
             )
         return super().update(**kwargs)
 
     def delete(self) -> tuple[int, dict[str, int]]:
-        if self.query.derived_relations:
+        if getattr(self.query, "_source_joins", {}):
             raise NotSupportedError(
-                "Calling delete() with DerivedRelation is not supported."
+                "Calling delete() with table sources is not supported."
             )
         return super().delete()
 

@@ -10,8 +10,10 @@
 
 Approved design: [DEP 24 backport design](2026-10-16-dep24-backport-design.md).
 
-This is a planning artifact, not an instruction to start implementation, merge
-other PRs, publish a release or enable the scalar-subquery reuse experiment.
+Implementation was authorised after this plan was written. The user changed
+the initial checkpoint to Django 5.2, with Django 4.2 assessed afterwards.
+Merging other PRs, publishing a release and enabling the scalar-subquery reuse
+experiment remain outside this work.
 Paths below are relative to a fresh implementation checkout of
 `django-derived-relation`. Do not modify the separate Django core checkout.
 
